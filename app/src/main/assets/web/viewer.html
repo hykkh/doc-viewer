@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=6, user-scalable=yes">
+<title>viewer</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #e6e6e6; }
+  body { font-family: sans-serif; -webkit-tap-highlight-color: transparent; }
+  #pages { padding: 8px 0 40px; }
+  .page {
+    position: relative; margin: 0 auto 10px; background: #fff;
+    box-shadow: 0 1px 3px rgba(0,0,0,.25); overflow: hidden;
+  }
+  .page > canvas, .page > svg, .page > img { display: block; width: 100%; height: 100%; }
+  .page .ph { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #bbb; font-size: 14px; }
+  #text { white-space: pre-wrap; word-break: break-all; background: #fff; margin: 8px; padding: 12px; font: 14px/1.6 monospace; }
+  #img { display: block; max-width: 100%; margin: 8px auto; background: #fff; }
+  #pageNum {
+    position: fixed; right: 10px; bottom: 12px; background: rgba(0,0,0,.6); color: #fff;
+    font-size: 13px; padding: 4px 10px; border-radius: 12px; display: none; z-index: 5;
+  }
+  #msg { padding: 40px 20px; text-align: center; color: #555; font-size: 15px; }
+  .hl { position: absolute; background: rgba(255, 213, 0, .38); border-radius: 2px; pointer-events: none; }
+  .hl.cur { background: rgba(255, 120, 0, .5); outline: 2px solid #ff7800; }
+  #search {
+    position: fixed; left: 0; right: 0; top: 0; z-index: 10; display: none; gap: 6px; align-items: center;
+    background: #fff; padding: 8px; box-shadow: 0 2px 6px rgba(0,0,0,.2);
+  }
+  #search input { flex: 1; min-width: 0; font-size: 16px; padding: 8px 10px; border: 1px solid #bbb; border-radius: 8px; }
+  #search button { font-size: 16px; min-width: 40px; height: 40px; border: 0; border-radius: 8px; background: #eef2fb; color: #2f6fed; }
+  #count { font-size: 13px; color: #555; min-width: 52px; text-align: center; }
+</style>
+</head>
+<body>
+<div id="search">
+  <input id="q" type="search" placeholder="문서에서 찾기" enterkeyhint="search">
+  <span id="count"></span>
+  <button id="prev" aria-label="이전">▲</button>
+  <button id="next" aria-label="다음">▼</button>
+  <button id="close" aria-label="닫기">✕</button>
+</div>
+<div id="msg">여는 중…</div>
+<div id="pages"></div>
+<div id="pageNum"></div>
+<script type="module" src="viewer.js"></script>
+</body>
+</html>

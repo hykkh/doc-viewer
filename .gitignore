@@ -1,0 +1,30 @@
+.gradle/
+build/
+app/build/
+app/.cxx/
+local.properties
+.idea/
+*.apk
+
+# research corpus, test runs, downloaded tools
+research/
+web-src/node_modules/
+
+# LibreOffice engine: restored by scripts/fetch-libreoffice.sh (too big for git)
+app/src/main/jniLibs/arm64-v8a/libc++_shared.so
+app/src/main/jniLibs/arm64-v8a/libfreebl3.so
+app/src/main/jniLibs/arm64-v8a/liblo-native-code.so
+app/src/main/jniLibs/arm64-v8a/libnspr4.so
+app/src/main/jniLibs/arm64-v8a/libnss3.so
+app/src/main/jniLibs/arm64-v8a/libnssckbi.so
+app/src/main/jniLibs/arm64-v8a/libnssdbm3.so
+app/src/main/jniLibs/arm64-v8a/libnssutil3.so
+app/src/main/jniLibs/arm64-v8a/libplc4.so
+app/src/main/jniLibs/arm64-v8a/libplds4.so
+app/src/main/jniLibs/arm64-v8a/libsmime3.so
+app/src/main/jniLibs/arm64-v8a/libsoftokn3.so
+app/src/main/jniLibs/arm64-v8a/libsqlite3.so
+app/src/main/jniLibs/arm64-v8a/libssl3.so
+app/src/main/assets/share/
+app/src/main/assets/program/
+app/src/main/assets/unpack/

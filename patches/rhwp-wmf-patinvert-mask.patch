@@ -1,0 +1,158 @@
+diff --git a/src/wmf/converter/svg/mod.rs b/src/wmf/converter/svg/mod.rs
+index 88f629c5..ad61c85c 100644
+--- a/src/wmf/converter/svg/mod.rs
++++ b/src/wmf/converter/svg/mod.rs
+@@ -8,7 +8,7 @@ use crate::wmf::{
+         svg::{
+             device_context::DeviceContext,
+             node::{Data, Node},
+-            ternary_raster_operator::{BrushOnlyRopSequence, TernaryRasterOperator},
++            ternary_raster_operator::{BrushOnlyRopSequence, TernaryRasterOperator, PATINVERT_MARK},
+             util::{as_point_string, url_string, Fill, Stroke},
+         },
+         GraphicsObject, PlayError, SelectedGraphicsObject,
+@@ -75,6 +75,7 @@ impl crate::wmf::converter::Player for SVGPlayer {
+             elements,
+             ..
+         } = self;
++        let elements = resolve_patinvert_masks(elements);
+ 
+         // [Task #860] WMF binary 의 SetWindowExt 가 actual element 의 bbox 보다 작은 경우
+         // (예: HWP3 sample14 의 WMF 가 1189 인데 image y+height=2304) viewBox 가 element
+@@ -2347,6 +2348,70 @@ impl crate::wmf::converter::Player for SVGPlayer {
+ /// [Task #860] Node 의 x+width attribute 합산 (viewBox 자동 확장용).
+ /// `<image>`, `<rect>`, `<polygon>` 등의 좌표 attribute 를 parse 하여
+ /// 최대 x+width 위치 반환. attribute 미존재 시 None.
++/// Resolves the GDI "XOR mask" idiom charts use for patterned/transparent series:
++///
++///   PATINVERT(rect, brush C) → filled shapes (mask, drawn black / with a pattern)
++///   → PATINVERT(same rect, brush C)
++///
++/// On the device the two XORs cancel outside the shapes and leave colour C inside
++/// them. Painted literally as SVG they become two opaque C rectangles covering the
++/// whole plot (the "red box" over line charts). Replace the pair with the shapes
++/// filled in C.
++fn resolve_patinvert_masks(elements: Vec<Node>) -> Vec<Node> {
++    const MAX_BETWEEN: usize = 64;
++    let key = |n: &Node| {
++        (
++            n.get("x").cloned(),
++            n.get("y").cloned(),
++            n.get("width").cloned(),
++            n.get("height").cloned(),
++            n.get("fill").cloned(),
++        )
++    };
++    let is_mark = |n: &Node| n.name() == Some("rect") && n.get(PATINVERT_MARK).is_some();
++    let is_shape = |n: &Node| matches!(n.name(), Some("path" | "polygon" | "rect" | "ellipse"));
++
++    let mut out: Vec<Option<Node>> = elements.into_iter().map(Some).collect();
++    let mut i = 0;
++    while i < out.len() {
++        let Some(first) = out[i].as_ref().filter(|n| is_mark(n)) else {
++            i += 1;
++            continue;
++        };
++        let k = key(first);
++        let fill = first.get("fill").cloned().unwrap_or_default();
++        let end = (i + 1 + MAX_BETWEEN + 1).min(out.len());
++        let closing = (i + 1..end).find(|&j| {
++            out[j].as_ref().is_some_and(|n| is_mark(n) && key(n) == k)
++        });
++        let Some(j) = closing else {
++            i += 1;
++            continue;
++        };
++        let between_ok = j > i + 1
++            && out[i + 1..j]
++                .iter()
++                .all(|n| n.as_ref().is_some_and(|n| is_shape(n) && !is_mark(n)));
++        if !between_ok {
++            i += 1;
++            continue;
++        }
++        for slot in &mut out[i + 1..j] {
++            if let Some(n) = slot.take() {
++                let filled = n.get("fill").is_some_and(|f| f != "none");
++                *slot = Some(if filled { n.set("fill", fill.as_str()) } else { n });
++            }
++        }
++        out[i] = None;
++        out[j] = None;
++        i = j + 1;
++    }
++    out.into_iter()
++        .flatten()
++        .map(|n| n.unset(PATINVERT_MARK))
++        .collect()
++}
++
+ fn element_max_x(elem: &Node) -> Option<i32> {
+     let s = elem.to_string();
+     let x = parse_attr_i32(&s, "x").unwrap_or(0);
+diff --git a/src/wmf/converter/svg/node.rs b/src/wmf/converter/svg/node.rs
+index 1d6b621d..9a289fed 100644
+--- a/src/wmf/converter/svg/node.rs
++++ b/src/wmf/converter/svg/node.rs
+@@ -47,6 +47,25 @@ impl Node {
+         self
+     }
+ 
++    /// Attribute value, if set.
++    pub fn get(&self, name: &str) -> Option<&String> {
++        self.attrs.get(name)
++    }
++
++    /// Removes an attribute.
++    pub fn unset(mut self, name: &str) -> Self {
++        self.attrs.remove(name);
++        self
++    }
++
++    /// Element name (`None` for text nodes).
++    pub fn name(&self) -> Option<&str> {
++        match &self.typ {
++            NodeType::Node(n) => Some(n.as_str()),
++            NodeType::Text(_) => None,
++        }
++    }
++
+     fn escape_text(value: impl ToString) -> String {
+         value
+             .to_string()
+diff --git a/src/wmf/converter/svg/ternary_raster_operator.rs b/src/wmf/converter/svg/ternary_raster_operator.rs
+index 06ed2e07..ae419ace 100644
+--- a/src/wmf/converter/svg/ternary_raster_operator.rs
++++ b/src/wmf/converter/svg/ternary_raster_operator.rs
+@@ -11,6 +11,9 @@ pub enum TernaryRasterOperationError {
+     NoSource { cause: String },
+ }
+ 
++/// Attribute marking rects approximated from a PATINVERT blit (stripped before output).
++pub const PATINVERT_MARK: &str = "data-rop-patinvert";
++
+ type BrushOnlyRopKey = (i16, i16, i16, i16, String);
+ 
+ #[derive(Default)]
+@@ -278,12 +281,19 @@ impl TernaryRasterOperator {
+                     return Ok(None);
+                 }
+ 
+-                Node::new("rect")
++                let rect = Node::new("rect")
+                     .set("x", self.x)
+                     .set("y", self.y)
+                     .set("width", self.width)
+                     .set("height", self.height)
+-                    .set("fill", fill.as_str())
++                    .set("fill", fill.as_str());
++                // Marked so SVGPlayer::generate can resolve the XOR mask idiom
++                // PATINVERT(rect) → shapes → PATINVERT(rect); see resolve_patinvert_masks.
++                if operation == TernaryRasterOperation::PATINVERT {
++                    rect.set(PATINVERT_MARK, "1")
++                } else {
++                    rect
++                }
+             }
+             operation if operation.use_source() => {
+                 info!(
