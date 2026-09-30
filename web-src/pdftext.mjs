@@ -1,0 +1,12 @@
+import fs from 'fs';
+const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
+const data = new Uint8Array(fs.readFileSync(process.argv[2]));
+const doc = await pdfjs.getDocument({ data, cMapUrl: 'node_modules/pdfjs-dist/cmaps/', cMapPacked: true, standardFontDataUrl: 'node_modules/pdfjs-dist/standard_fonts/' }).promise;
+const page = await doc.getPage(2);
+const tc = await page.getTextContent();
+console.log('items', tc.items.length);
+console.log(JSON.stringify(tc.items.slice(0, 5)));
+let str = tc.items.map(i => i.str).join('');
+console.log(str.slice(0, 200));
+const vp = page.getViewport({ scale: 1 });
+console.log('has convertToViewportRectangle', typeof vp.convertToViewportRectangle);

@@ -18,11 +18,11 @@ object DocKinds {
         "doc", "docx", "docm", "dot", "dotx", "dotm", "rtf", "odt", "ott", "fodt", "wps", "wpd", "pages", "lwp", "abw", "sxw",
         "xls", "xlsx", "xlsm", "xlsb", "xlt", "xltx", "xltm", "ods", "ots", "fods", "numbers", "sxc", "et", "dbf", "slk",
         "ppt", "pptx", "pptm", "pps", "ppsx", "pot", "potx", "odp", "otp", "fodp", "key", "sxi", "dps",
-        "odg", "vsd", "vsdx", "pub", "xps", "emf", "wmf", "svg", "cdr", "csv",
+        "odg", "vsd", "vsdx", "pub", "xps", "emf", "wmf", "svg", "cdr",
     )
     private val hwpExt = setOf("hwp", "hwpx", "hwt", "hwtx", "hml")
     private val imageExt = setOf("jpg", "jpeg", "png", "gif", "webp", "bmp", "heic", "heif", "avif", "ico")
-    private val textExt = setOf("txt", "log", "md", "json", "xml", "ini", "cfg", "conf", "yaml", "yml", "java", "kt", "py", "js", "c", "cpp", "h", "sh", "bat", "html", "htm", "srt", "smi")
+    private val textExt = setOf("txt", "csv", "tsv", "log", "md", "json", "xml", "ini", "cfg", "conf", "yaml", "yml", "java", "kt", "py", "js", "c", "cpp", "h", "sh", "bat", "html", "htm", "srt", "smi")
 
     fun extOf(name: String): String = name.substringAfterLast('.', "").lowercase()
 
@@ -43,12 +43,20 @@ object DocKinds {
             return if (zipIsHwpx(file) || ext == "hwpx" || ext == "hwtx") DocKind.HWP else DocKind.OFFICE
         }
         if (startsWith("<?xml") && ext == "hml") return DocKind.HWP
+        // Some PDFs carry junk before the header; readers accept it within the first 1KB.
+        if (ext == "pdf" || headerWithin(file, "%PDF-", 1024)) return DocKind.PDF
         if (ext in imageExt || isImageMagic(head, n)) return DocKind.IMAGE
         if (ext in hwpExt) return DocKind.HWP
         if (ext in textExt) return DocKind.TEXT
         if (ext in officeExt) return DocKind.OFFICE
         // Unknown: LibreOffice has the widest type detection.
         return DocKind.OFFICE
+    }
+
+    private fun headerWithin(file: File, sig: String, limit: Int): Boolean {
+        val buf = ByteArray(minOf(file.length(), limit.toLong()).toInt())
+        RandomAccessFile(file, "r").use { it.readFully(buf) }
+        return String(buf, Charsets.ISO_8859_1).contains(sig)
     }
 
     private fun isImageMagic(h: ByteArray, n: Int): Boolean {

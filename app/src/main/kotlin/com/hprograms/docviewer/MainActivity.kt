@@ -95,7 +95,7 @@ class MainActivity : AppCompatActivity() {
     override fun onOptionsItemSelected(item: android.view.MenuItem): Boolean {
         if (item.itemId != 1) return super.onOptionsItemSelected(item)
         AlertDialog.Builder(this)
-            .setTitle("문서뷰어 ${BuildConfig.VERSION_NAME}")
+            .setTitle("Hoffice ${BuildConfig.VERSION_NAME}")
             .setMessage(
                 "본 제품은 한글과컴퓨터의 한글 문서 파일(.hwp) 공개 문서를 참고하여 개발하였습니다.\n\n" +
                     "사용한 오픈소스\n" +
@@ -166,15 +166,24 @@ class MainActivity : AppCompatActivity() {
 
     // ---- documents on the phone ----------------------------------------------------
 
-    private fun hasAllFilesAccess() =
-        Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()
+    private fun hasAllFilesAccess() = if (Build.VERSION.SDK_INT >= 30) {
+        Environment.isExternalStorageManager()
+    } else {
+        checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE) == android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+
+    private val askStorage = registerForActivityResult(ActivityResultContracts.RequestPermission()) { if (tab == Tab.PHONE) showPhone() }
 
     private fun showPhone() {
         if (!hasAllFilesAccess()) {
             show(emptyList(), "폰에 있는 문서를 모아 보려면 '모든 파일 접근' 권한이 필요합니다.\n\n여기를 누르면 설정 화면이 열립니다.")
             empty.setOnClickListener {
-                runCatching {
-                    startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName")))
+                if (Build.VERSION.SDK_INT >= 30) {
+                    runCatching {
+                        startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName")))
+                    }
+                } else {
+                    askStorage.launch(android.Manifest.permission.READ_EXTERNAL_STORAGE)
                 }
             }
             return

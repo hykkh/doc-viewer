@@ -2,13 +2,16 @@ package com.hprograms.docviewer
 
 import android.annotation.SuppressLint
 import android.app.ActivityManager
+import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.os.ResultReceiver
+import android.text.InputType
 import android.view.Gravity
 import android.view.Menu
 import android.view.MenuItem
@@ -18,10 +21,12 @@ import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
@@ -32,6 +37,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileInputStream
+import java.util.UUID
 
 class ViewerActivity : AppCompatActivity() {
 
@@ -44,7 +50,13 @@ class ViewerActivity : AppCompatActivity() {
     private var served: File? = null
     private var loadedKind: String? = null
     private var triedOfficeFallback = false
-    private var convertStarted = 0L
+
+    // Office conversion in flight: the job id we sent, and when the engine started it.
+    private var jobId: String? = null
+    private var jobStarted = 0L
+
+    // The WebView renderer died (e.g. out of memory); the WebView must not be used again.
+    private var webDead = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -59,11 +71,12 @@ class ViewerActivity : AppCompatActivity() {
                         id != null -> Library.recent(this@ViewerActivity).firstOrNull { it.id == id && it.name == intent.getStringExtra(EXTRA_ENTRY_NAME) }
                             ?.also { Library.touch(this@ViewerActivity, it) }
                             ?: throw IllegalStateException("최근 문서 목록에서 찾을 수 없습니다")
-                        uri != null -> Library.import(this@ViewerActivity, uri)
+                        uri != null -> Library.import(this@ViewerActivity, checkUri(uri))
                         else -> throw IllegalStateException("열 파일이 없습니다")
                     }
                 }
                 entry = e
+                Library.use(e.id, true)
                 supportActionBar?.title = e.name
                 show(e)
             } catch (t: Throwable) {
@@ -75,6 +88,19 @@ class ViewerActivity : AppCompatActivity() {
     private fun incomingUri(i: Intent): Uri? = when (i.action) {
         Intent.ACTION_SEND -> i.getParcelableExtraCompat(Intent.EXTRA_STREAM)
         else -> i.data
+    }
+
+    /**
+     * This activity is exported, so any app can hand it a file:// URI. Accept
+     * file:// only for regular files on shared storage — never our own private
+     * data, which we could otherwise be tricked into listing and sharing.
+     */
+    private fun checkUri(uri: Uri): Uri {
+        if (uri.scheme != "file") return uri
+        val f = File(uri.path ?: "").canonicalFile
+        val shared = Environment.getExternalStorageDirectory().canonicalPath + File.separator
+        if (!f.path.startsWith(shared) || !f.isFile) throw SecurityException("이 위치의 파일은 열 수 없습니다")
+        return Uri.fromFile(f)
     }
 
     // ---- UI --------------------------------------------------------------------
@@ -115,6 +141,8 @@ class ViewerActivity : AppCompatActivity() {
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
     }
 
+    private fun alive() = !isFinishing && !isDestroyed
+
     private fun setStatus(msg: String?, spinning: Boolean = true) {
         if (msg == null) {
             status.visibility = View.GONE
@@ -123,9 +151,14 @@ class ViewerActivity : AppCompatActivity() {
         status.visibility = View.VISIBLE
         status.getChildAt(0).visibility = if (spinning) View.VISIBLE else View.GONE
         statusText.text = msg
+        status.setOnClickListener(null)
     }
 
     private fun showError(msg: String) = setStatus("열 수 없습니다\n\n$msg", spinning = false)
+
+    private fun js(code: String) {
+        if (!webDead && alive()) web.evaluateJavascript(code, null)
+    }
 
     // ---- routing -----------------------------------------------------------------
 
@@ -140,6 +173,7 @@ class ViewerActivity : AppCompatActivity() {
     }
 
     private fun load(file: File, kind: String) {
+        if (webDead || !alive()) return
         served = file
         loadedKind = kind
         setStatus("여는 중…")
@@ -148,17 +182,26 @@ class ViewerActivity : AppCompatActivity() {
     }
 
     private fun convertThenLoad(e: DocEntry, password: String? = null) {
-        val pdf = File(Library.pdfDir(this), e.id.substringBefore('.') + ".pdf")
+        val pdf = Library.pdfFor(this, e)
         if (pdf.exists() && pdf.length() > 0) {
             load(pdf, "pdf")
             return
         }
-        convertStarted = System.currentTimeMillis()
-        tickConvert()
+        val id = UUID.randomUUID().toString()
+        jobId = id
+        jobStarted = 0L
+        setStatus("문서 준비 중…")
         val receiver = object : ResultReceiver(main) {
             override fun onReceiveResult(resultCode: Int, data: Bundle?) {
-                if (convertStarted == 0L) return
-                convertStarted = 0L
+                if (jobId != id || !alive()) return
+                if (resultCode == OfficeService.RESULT_STARTED) {
+                    // Count the time limit from when the engine picks the job up,
+                    // not from when it was queued behind someone else's file.
+                    jobStarted = System.currentTimeMillis()
+                    tickConvert(id)
+                    return
+                }
+                jobId = null
                 val err = data?.getString(OfficeService.KEY_ERROR) ?: "변환 실패"
                 when {
                     resultCode == OfficeService.RESULT_OK -> load(pdf, "pdf")
@@ -169,6 +212,7 @@ class ViewerActivity : AppCompatActivity() {
         }
         startService(
             Intent(this, OfficeService::class.java)
+                .putExtra(OfficeService.EXTRA_JOB, id)
                 .putExtra(OfficeService.EXTRA_IN, e.file(this).absolutePath)
                 .putExtra(OfficeService.EXTRA_OUT, pdf.absolutePath)
                 .putExtra(OfficeService.EXTRA_RECEIVER, receiver)
@@ -177,12 +221,13 @@ class ViewerActivity : AppCompatActivity() {
     }
 
     private fun askPassword(title: String, onCancel: () -> Unit = { finish() }, then: (String) -> Unit) {
+        if (!alive()) return
         setStatus(title, spinning = false)
-        val input = android.widget.EditText(this).apply {
-            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             hint = "비밀번호"
         }
-        android.app.AlertDialog.Builder(this)
+        AlertDialog.Builder(this)
             .setTitle(title)
             .setView(input)
             .setPositiveButton("열기") { _, _ -> then(input.text.toString()) }
@@ -191,24 +236,39 @@ class ViewerActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun tickConvert() {
-        val started = convertStarted
-        if (started == 0L) return
-        val sec = (System.currentTimeMillis() - started) / 1000
+    private fun askPage(count: Int) {
+        if (!alive()) return
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            hint = "1 ~ $count"
+        }
+        AlertDialog.Builder(this)
+            .setTitle("이동할 쪽")
+            .setView(input)
+            .setPositiveButton("이동") { _, _ ->
+                input.text.toString().toIntOrNull()?.takeIf { it in 1..count }?.let { js("window.gotoPage($it)") }
+            }
+            .setNegativeButton("취소", null)
+            .show()
+    }
+
+    private fun tickConvert(id: String) {
+        if (jobId != id || !alive()) return
+        val sec = (System.currentTimeMillis() - jobStarted) / 1000
         if (sec >= CONVERT_TIMEOUT_SEC) {
-            convertStarted = 0L
+            jobId = null
             killOfficeProcess(this)
             showError("문서 변환이 ${CONVERT_TIMEOUT_SEC}초 안에 끝나지 않았습니다")
             return
         }
         if (sec >= 3 && !officeProcessAlive(this)) {
             // The engine died on this file (native crash) without answering.
-            convertStarted = 0L
+            jobId = null
             showError("문서 엔진이 이 파일을 읽다가 멈췄습니다")
             return
         }
         setStatus(if (sec < 2) "문서 준비 중…" else "문서 준비 중… ${sec}초")
-        main.postDelayed({ tickConvert() }, 1000)
+        main.postDelayed({ tickConvert(id) }, 1000)
     }
 
     // ---- WebView plumbing --------------------------------------------------------
@@ -224,8 +284,14 @@ class ViewerActivity : AppCompatActivity() {
             assetLoader.shouldInterceptRequest(request.url)
 
         override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail): Boolean {
-            // Out of memory on a huge page etc. — keep the app alive.
-            showError("화면을 그리다 메모리가 부족했습니다")
+            // The WebView is unusable from here on. Drop it; a tap rebuilds the screen.
+            webDead = true
+            (view.parent as? android.view.ViewGroup)?.removeView(view)
+            view.destroy()
+            if (alive()) {
+                setStatus("화면을 그리다 메모리가 부족했습니다\n\n눌러서 다시 열기", spinning = false)
+                status.setOnClickListener { recreate() }
+            }
             return true
         }
 
@@ -245,7 +311,7 @@ class ViewerActivity : AppCompatActivity() {
     private fun doc(path: String): WebResourceResponse? {
         val f = served ?: return null
         if (Uri.decode(path) != f.name) return null
-        return WebResourceResponse("application/octet-stream", null, FileInputStream(f))
+        return runCatching { WebResourceResponse("application/octet-stream", null, FileInputStream(f)) }.getOrNull()
     }
 
     private fun mimeOf(path: String) = when (path.substringAfterLast('.').lowercase()) {
@@ -258,34 +324,42 @@ class ViewerActivity : AppCompatActivity() {
         else -> "application/octet-stream"
     }
 
+    /** Called by viewer.js. Every callback hops to the main thread and is dropped once we are closing. */
     inner class JsBridge {
+        private fun ui(block: () -> Unit) {
+            main.post { if (alive()) block() }
+        }
+
         @JavascriptInterface
-        fun askPassword(message: String) = main.post {
+        fun askPassword(message: String) = ui {
             askPassword(message, onCancel = { reply(null) }) { reply(it) }
         }
 
         private fun reply(pw: String?) {
             val arg = if (pw == null) "null" else org.json.JSONObject.quote(pw)
-            web.evaluateJavascript("window.__pwResolve && window.__pwResolve($arg)", null)
+            js("window.__pwResolve && window.__pwResolve($arg)")
         }
 
         @JavascriptInterface
-        fun onPrintProgress(done: Int, total: Int) = main.post { setStatus("PDF 만드는 중… $done / $total") }
+        fun askPage(count: Int) = ui { this@ViewerActivity.askPage(count) }
 
         @JavascriptInterface
-        fun onPrintReady(widthPx: Double, heightPx: Double) = main.post { writeHwpPdf(widthPx, heightPx) }
+        fun onPrintProgress(done: Int, total: Int) = ui { setStatus("PDF 만드는 중… $done / $total") }
 
         @JavascriptInterface
-        fun onPrintFail(message: String) = main.post {
+        fun onPrintReady(widthPx: Double, heightPx: Double) = ui { writeHwpPdf(widthPx, heightPx) }
+
+        @JavascriptInterface
+        fun onPrintFail(message: String) = ui {
             setStatus(null)
             toast("PDF를 만들지 못했습니다: $message")
         }
 
         @JavascriptInterface
-        fun onReady(pages: Int) = main.post { setStatus(null) }
+        fun onReady(pages: Int) = ui { setStatus(null) }
 
         @JavascriptInterface
-        fun onFail(message: String) = main.post {
+        fun onFail(message: String) = ui {
             val e = entry
             // rhwp covers HWP 5.0/HWPX; LibreOffice can still read some old HWP 97 files.
             if (e != null && e.kind == DocKind.HWP && !triedOfficeFallback && !message.contains("비밀번호")) {
@@ -300,12 +374,12 @@ class ViewerActivity : AppCompatActivity() {
     // ---- menu --------------------------------------------------------------------
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
-        menu.add(0, 3, 0, "찾기").setIcon(android.R.drawable.ic_menu_search)
+        menu.add(0, MENU_FIND, 0, "찾기").setIcon(android.R.drawable.ic_menu_search)
             .setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
-        menu.add(0, 4, 0, "쪽 이동")
-        menu.add(0, 1, 0, "공유")
-        menu.add(0, 5, 0, "PDF로 공유")
-        menu.add(0, 2, 0, "다른 앱으로 열기")
+        menu.add(0, MENU_PAGE, 0, "쪽 이동")
+        menu.add(0, MENU_SHARE, 0, "공유")
+        menu.add(0, MENU_SHARE_PDF, 0, "PDF로 공유")
+        menu.add(0, MENU_OPEN_WITH, 0, "다른 앱으로 열기")
         return true
     }
 
@@ -313,11 +387,11 @@ class ViewerActivity : AppCompatActivity() {
         val e = entry
         when (item.itemId) {
             android.R.id.home -> finish()
-            3 -> web.evaluateJavascript("window.showSearch && window.showSearch()", null)
-            4 -> web.evaluateJavascript("document.getElementById('pageNum').click()", null)
-            1 -> if (e != null) shareFile(e.file(this), e.name, send = true)
-            2 -> if (e != null) shareFile(e.file(this), e.name, send = false)
-            5 -> if (e != null) sharePdf(e)
+            MENU_FIND -> js("window.showSearch && window.showSearch()")
+            MENU_PAGE -> js("window.askJump && window.askJump()")
+            MENU_SHARE -> if (e != null) shareFile(e.file(this), e.name, send = true)
+            MENU_OPEN_WITH -> if (e != null) shareFile(e.file(this), e.name, send = false)
+            MENU_SHARE_PDF -> if (e != null) sharePdf(e)
             else -> return super.onOptionsItemSelected(item)
         }
         return true
@@ -327,21 +401,33 @@ class ViewerActivity : AppCompatActivity() {
 
     private fun pdfName(e: DocEntry) = e.name.substringBeforeLast('.', e.name) + ".pdf"
 
-    /** Hands [file] to other apps under the name [name]. */
+    /** Hands [file] to other apps under the name [name]. The copy runs off the main thread. */
     private fun shareFile(file: File, name: String, send: Boolean) {
-        val shareDir = File(cacheDir, "share").apply { deleteRecursively(); mkdirs() }
-        val out = File(shareDir, name.replace('/', '_'))
-        file.copyTo(out, overwrite = true)
-        val uri = FileProvider.getUriForFile(this, "$packageName.files", out)
-        val mime = android.webkit.MimeTypeMap.getSingleton()
-            .getMimeTypeFromExtension(DocKinds.extOf(name)) ?: "application/octet-stream"
-        val i = if (send) {
-            Intent(Intent.ACTION_SEND).setType(mime).putExtra(Intent.EXTRA_STREAM, uri)
-        } else {
-            Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime)
+        lifecycleScope.launch {
+            val out = withContext(Dispatchers.IO) {
+                runCatching {
+                    val shareDir = File(cacheDir, "share").apply { deleteRecursively(); mkdirs() }
+                    // Keep the name readable but harmless as a file name.
+                    val safe = name.replace(Regex("[/\\\\:*?\"<>|\\u0000-\\u001f]"), "_").trim().trimStart('.')
+                        .ifEmpty { "document" }.take(120)
+                    File(shareDir, safe).also { file.copyTo(it, overwrite = true) }
+                }.getOrNull()
+            }
+            if (out == null || !alive()) {
+                if (alive()) toast("파일을 준비하지 못했습니다")
+                return@launch
+            }
+            val uri = FileProvider.getUriForFile(this@ViewerActivity, "$packageName.files", out)
+            val mime = android.webkit.MimeTypeMap.getSingleton()
+                .getMimeTypeFromExtension(DocKinds.extOf(out.name)) ?: "application/octet-stream"
+            val i = if (send) {
+                Intent(Intent.ACTION_SEND).setType(mime).putExtra(Intent.EXTRA_STREAM, uri)
+            } else {
+                Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime)
+            }
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            runCatching { startActivity(Intent.createChooser(i, if (send) "공유" else "다른 앱으로 열기")) }
         }
-        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        runCatching { startActivity(Intent.createChooser(i, if (send) "공유" else "다른 앱으로 열기")) }
     }
 
     private fun sharePdf(e: DocEntry) {
@@ -350,7 +436,7 @@ class ViewerActivity : AppCompatActivity() {
             f != null && loadedKind == "pdf" -> shareFile(f, pdfName(e), send = true)
             loadedKind == "hwp" -> {
                 setStatus("PDF 만드는 중…")
-                web.evaluateJavascript("window.preparePrint()", null)
+                js("window.preparePrint()")
             }
             else -> toast("이 파일은 PDF로 만들 수 없습니다")
         }
@@ -359,6 +445,7 @@ class ViewerActivity : AppCompatActivity() {
     /** Prints the HWP pages the page just laid out into a PDF, then shares it. */
     private fun writeHwpPdf(widthPx: Double, heightPx: Double) {
         val e = entry ?: return
+        if (webDead) return
         val mils = { px: Double -> (px / 96.0 * 1000).toInt() }
         val attrs = android.print.PrintAttributes.Builder()
             .setMediaSize(android.print.PrintAttributes.MediaSize("doc", "doc", mils(widthPx), mils(heightPx)))
@@ -369,6 +456,9 @@ class ViewerActivity : AppCompatActivity() {
         val adapter = web.createPrintDocumentAdapter(e.name)
         android.print.PdfPrint.write(adapter, attrs, out) { err ->
             main.post {
+                // The print-only page images are no longer needed.
+                js("window.cleanupPrint && window.cleanupPrint()")
+                if (!alive()) return@post
                 setStatus(null)
                 if (err == null && out.length() > 0) shareFile(out, pdfName(e), send = true)
                 else toast("PDF를 만들지 못했습니다: $err")
@@ -376,11 +466,14 @@ class ViewerActivity : AppCompatActivity() {
         }
     }
 
-    private fun toast(msg: String) = android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_LONG).show()
+    private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
 
     override fun onDestroy() {
-        convertStarted = 0L
-        web.destroy()
+        // Tell the engine to skip our file if it has not started on it yet.
+        jobId?.let { startService(Intent(this, OfficeService::class.java).setAction(OfficeService.ACTION_CANCEL).putExtra(OfficeService.EXTRA_JOB, it)) }
+        jobId = null
+        entry?.let { Library.use(it.id, false) }
+        if (!webDead) web.destroy()
         super.onDestroy()
     }
 
@@ -389,6 +482,11 @@ class ViewerActivity : AppCompatActivity() {
         const val EXTRA_ENTRY_NAME = "entry_name"
         private const val HOST = "appassets.androidplatform.net"
         private const val CONVERT_TIMEOUT_SEC = 180
+        private const val MENU_SHARE = 1
+        private const val MENU_OPEN_WITH = 2
+        private const val MENU_FIND = 3
+        private const val MENU_PAGE = 4
+        private const val MENU_SHARE_PDF = 5
 
         fun officeProcessAlive(ctx: Context): Boolean {
             val am = ctx.getSystemService(ACTIVITY_SERVICE) as ActivityManager

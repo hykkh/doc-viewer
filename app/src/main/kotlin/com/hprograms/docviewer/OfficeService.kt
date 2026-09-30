@@ -31,12 +31,22 @@ open class OfficeService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    private val main = Handler(Looper.getMainLooper())
+    private val cancelled = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val pending = java.util.concurrent.atomic.AtomicInteger()
+
+    // LibreOffice holds a few hundred MB; give it back once the queue has been idle a while.
+    private val idleExit = Runnable {
+        if (pending.get() == 0) android.os.Process.killProcess(android.os.Process.myPid())
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val input = intent?.getStringExtra(EXTRA_IN)
-        val password = intent?.getStringExtra(EXTRA_UNLOCK)
-        val output = intent?.getStringExtra(EXTRA_OUT)
-        val receiver = intent?.getParcelableExtraCompat<ResultReceiver>(EXTRA_RECEIVER)
-        if (intent?.getBooleanExtra(EXTRA_BATCH, false) == true) {
+        if (intent == null) return START_NOT_STICKY
+        if (intent.action == ACTION_CANCEL) {
+            intent.getStringExtra(EXTRA_JOB)?.let { cancelled.add(it) }
+            return START_NOT_STICKY
+        }
+        if (intent.getBooleanExtra(EXTRA_BATCH, false)) {
             val shard = intent.getIntExtra(EXTRA_SHARD, 0)
             val shards = intent.getIntExtra(EXTRA_SHARDS, 1)
             val pw = intent.getStringExtra(EXTRA_UNLOCK)
@@ -44,26 +54,35 @@ open class OfficeService : Service() {
             worker.execute { runBatch(shard, shards, pw, timeout) }
             return START_NOT_STICKY
         }
-        if (input == null || output == null) return START_NOT_STICKY
+        val input = intent.getStringExtra(EXTRA_IN)
+        val output = intent.getStringExtra(EXTRA_OUT)
+        val password = intent.getStringExtra(EXTRA_UNLOCK)
+        val job = intent.getStringExtra(EXTRA_JOB) ?: ""
+        val receiver = intent.getParcelableExtraCompat<ResultReceiver>(EXTRA_RECEIVER)
+        if (input == null || output == null || receiver == null) return START_NOT_STICKY
 
+        pending.incrementAndGet()
+        main.removeCallbacks(idleExit)
         worker.execute {
-            val t0 = System.currentTimeMillis()
-            val result = Bundle()
-            var line: String
             try {
-                convert(File(input), File(output), password)
-                result.putLong(KEY_MS, System.currentTimeMillis() - t0)
-                receiver?.send(RESULT_OK, result)
-                line = "OK\t${System.currentTimeMillis() - t0}\t$input"
-            } catch (e: Throwable) {
-                Log.e(TAG, "convert failed: $input", e)
-                result.putString(KEY_ERROR, e.message ?: e.toString())
-                result.putBoolean(KEY_LOCKED, e is PasswordNeeded)
-                receiver?.send(RESULT_FAIL, result)
-                line = "FAIL\t${System.currentTimeMillis() - t0}\t$input\t${e.message}"
+                // The viewer that asked for this closed before we got to it.
+                if (cancelled.remove(job)) return@execute
+                receiver.send(RESULT_STARTED, null)
+                val t0 = System.currentTimeMillis()
+                val result = Bundle()
+                try {
+                    convert(File(input), File(output), password)
+                    result.putLong(KEY_MS, System.currentTimeMillis() - t0)
+                    receiver.send(RESULT_OK, result)
+                } catch (e: Throwable) {
+                    Log.e(TAG, "convert failed: $input", e)
+                    result.putString(KEY_ERROR, e.message ?: e.toString())
+                    result.putBoolean(KEY_LOCKED, e is PasswordNeeded)
+                    receiver.send(RESULT_FAIL, result)
+                }
+            } finally {
+                if (pending.decrementAndGet() == 0) main.postDelayed(idleExit, IDLE_EXIT_MS)
             }
-            // Batch testing from adb (no receiver): append the outcome to a log.
-            if (receiver == null) File(filesDir, "batch.log").appendText(line + "\n")
         }
         return START_NOT_STICKY
     }
@@ -145,6 +164,8 @@ open class OfficeService : Service() {
     private fun convert(input: File, output: File, password: String?) {
         val o = ensureOffice()
         output.delete()
+        val part = File(output.path + ".part")
+        part.delete()
         currentPassword = password
         passwordAsks = 0
         val url = input.toURI().toString()
@@ -158,6 +179,7 @@ open class OfficeService : Service() {
             LokExtra.documentLoadWithOptions(LibreOfficeKit.getLibreOfficeKitHandle(), url, "Batch=true")?.let { Document(it) }
         }
         if (doc == null) {
+            part.delete()
             if (passwordAsks > 0) throw PasswordNeeded(if (password == null) "비밀번호가 걸린 문서입니다" else "비밀번호가 틀렸습니다")
             throw IllegalStateException("문서를 읽지 못했습니다 (${o.error?.takeIf { it.isNotBlank() } ?: "형식 인식 실패"})")
         }
@@ -172,17 +194,26 @@ open class OfficeService : Service() {
             } else {
                 ""
             }
-            doc.saveAs(output.toURI().toString(), "pdf", options)
+            // Write beside the target and rename when done, so a conversion that
+            // is killed or fails never leaves a half-written PDF in the cache.
+            doc.saveAs(part.toURI().toString(), "pdf", options)
         } finally {
             doc.destroy()
         }
-        if (!output.exists() || output.length() == 0L) {
+        if (!part.exists() || part.length() == 0L) {
+            part.delete()
             throw IllegalStateException("PDF 변환 결과가 비어 있습니다")
+        }
+        if (!part.renameTo(output)) {
+            part.delete()
+            throw IllegalStateException("PDF를 저장하지 못했습니다")
         }
     }
 
     companion object {
         private const val TAG = "OfficeService"
+        const val ACTION_CANCEL = "com.hprograms.docviewer.CANCEL"
+        const val EXTRA_JOB = "job"
         const val EXTRA_IN = "in"
         const val EXTRA_OUT = "out"
         const val EXTRA_RECEIVER = "receiver"
@@ -194,18 +225,21 @@ open class OfficeService : Service() {
         // About 40 A4 pages of area (A4 ≈ 11906 × 16838 twips).
         private const val MAX_SINGLE_PAGE_TWIPS2 = 40L * 11906 * 16838
         private const val BATCH_TIMEOUT_MS = 30_000L
+        private const val IDLE_EXIT_MS = 60_000L
         const val KEY_LOCKED = "doc_locked"
+        const val RESULT_STARTED = 3
         const val RESULT_OK = 1
         const val RESULT_FAIL = 2
         const val KEY_ERROR = "error"
         const val KEY_MS = "ms"
 
-        /** LibreOffice expects assets/unpack copied into the data dir; redo it once per app version. */
+        /** LibreOffice expects assets/unpack copied into the data dir; redo it after every install/update. */
         private fun unpackAssets(ctx: Context) {
             val prefs = ctx.getSharedPreferences("lo", Context.MODE_PRIVATE)
-            if (prefs.getInt("unpacked", -1) == BuildConfig.VERSION_CODE) return
+            val stamp = ctx.packageManager.getPackageInfo(ctx.packageName, 0).lastUpdateTime
+            if (prefs.getLong("unpacked_at", -1) == stamp) return
             if (copyTree(ctx.assets, "unpack", File(ctx.applicationInfo.dataDir))) {
-                prefs.edit().putInt("unpacked", BuildConfig.VERSION_CODE).apply()
+                prefs.edit().putLong("unpacked_at", stamp).commit()
             }
         }
 

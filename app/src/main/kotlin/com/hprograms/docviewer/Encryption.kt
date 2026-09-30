@@ -1,9 +1,11 @@
 package com.hprograms.docviewer
 
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.BitSet
 
 /**
  * Tells whether an MS Office file is password-encrypted, without opening it
@@ -17,21 +19,22 @@ import java.nio.ByteOrder
 object Encryption {
 
     fun isEncrypted(file: File): Boolean = runCatching {
-        val cfb = Cfb.open(file) ?: return false // not an OLE compound file (zip/ooxml etc. are never encrypted as zip)
-        val names = cfb.streamNames()
-        when {
-            // Encrypted docx/xlsx/pptx: an OLE wrapper around EncryptedPackage.
-            "EncryptionInfo" in names || "EncryptedPackage" in names -> true
-            // PowerPoint 97-2003
-            "EncryptedSummary" in names -> true
-            "Current User" in names && pptCurrentUserEncrypted(cfb.read("Current User")) -> true
-            // Word 97-2003: FIB flag fEncrypted
-            "WordDocument" in names -> wordEncrypted(cfb.read("WordDocument"))
-            // Excel 97-2003: FILEPASS record in the workbook globals
-            "Workbook" in names -> excelEncrypted(cfb.read("Workbook"))
-            "Book" in names -> excelEncrypted(cfb.read("Book"))
-            else -> false
-        }
+        Cfb.open(file)?.use { cfb ->
+            val names = cfb.streamNames()
+            when {
+                // Encrypted docx/xlsx/pptx: an OLE wrapper around EncryptedPackage.
+                "EncryptionInfo" in names || "EncryptedPackage" in names -> true
+                // PowerPoint 97-2003
+                "EncryptedSummary" in names -> true
+                "Current User" in names && pptCurrentUserEncrypted(cfb.read("Current User", 64)) -> true
+                // Word 97-2003: FIB flag fEncrypted
+                "WordDocument" in names -> wordEncrypted(cfb.read("WordDocument", 64))
+                // Excel 97-2003: FILEPASS record in the workbook globals
+                "Workbook" in names -> excelEncrypted(cfb.read("Workbook", 64 * 1024))
+                "Book" in names -> excelEncrypted(cfb.read("Book", 64 * 1024))
+                else -> false
+            }
+        } ?: false
     }.getOrDefault(false)
 
     private fun pptCurrentUserEncrypted(b: ByteArray?): Boolean {
@@ -62,71 +65,93 @@ object Encryption {
         return false
     }
 
-    /** Minimal read-only reader for the OLE Compound File Binary format ([MS-CFB]). */
-    private class Cfb(private val data: ByteArray) {
-        private val bb = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
-        private val sectorSize = 1 shl bb.getShort(0x1E).toInt()
-        private val miniSectorSize = 1 shl bb.getShort(0x20).toInt()
-        private val miniCutoff = bb.getInt(0x38)
-        private val fat = readFat()
+    /**
+     * Minimal read-only reader for the OLE Compound File Binary format ([MS-CFB]).
+     * Reads sectors from disk on demand; every chain walk is bounded by the file's
+     * sector count and stops on a repeated sector, so malformed files cannot loop
+     * or blow up memory.
+     */
+    private class Cfb(private val raf: RandomAccessFile) : AutoCloseable {
+        private val header = ByteArray(512).also { raf.seek(0); raf.readFully(it) }
+        private val hb = ByteBuffer.wrap(header).order(ByteOrder.LITTLE_ENDIAN)
+        private val sectorShift = hb.getShort(0x1E).toInt()
+        private val sectorSize = 1 shl sectorShift.coerceIn(9, 12)
+        private val miniSectorSize = 1 shl hb.getShort(0x20).toInt().coerceIn(6, 9)
+        private val miniCutoff = hb.getInt(0x38)
+        private val sectorCount = ((raf.length() - sectorSize) / sectorSize).coerceIn(0, Int.MAX_VALUE.toLong()).toInt()
+        private val fat: IntArray = readFat()
         private val entries = readDirectory()
-        private val miniFat by lazy { chainBytes(bb.getInt(0x3C)).let { ints(it) } }
-        private val miniStream by lazy { entries.firstOrNull()?.let { chainBytes(it.start) } ?: ByteArray(0) }
+        private val miniFat by lazy { ints(chain(hb.getInt(0x3C), MAX_TABLE_BYTES)) }
+        private val miniStream by lazy { entries.firstOrNull()?.let { chain(it.start, MAX_MINI_STREAM) } ?: ByteArray(0) }
 
         class Entry(val name: String, val type: Int, val start: Int, val size: Long)
 
+        override fun close() = raf.close()
+
         fun streamNames() = entries.filter { it.type == 2 }.map { it.name }.toSet()
 
-        fun read(name: String): ByteArray? {
+        fun read(name: String, limit: Int): ByteArray? {
             val e = entries.firstOrNull { it.type == 2 && it.name == name } ?: return null
-            val limit = minOf(e.size, 1L shl 20).toInt() // headers only; never need more than 1MB
+            val want = minOf(e.size, limit.toLong()).toInt()
             return if (e.size < miniCutoff) {
-                val out = java.io.ByteArrayOutputStream()
+                val out = ByteArrayOutputStream()
+                val seen = BitSet()
                 var s = e.start
-                var guard = 0
-                while (s >= 0 && out.size() < limit && guard++ < 100_000) {
+                while (s >= 0 && out.size() < want && !seen[s]) {
+                    seen.set(s)
                     val off = s * miniSectorSize
                     if (off + miniSectorSize > miniStream.size) break
                     out.write(miniStream, off, miniSectorSize)
                     s = miniFat.getOrElse(s) { -2 }
                 }
-                out.toByteArray().copyOf(minOf(limit, out.size()))
+                out.toByteArray().copyOf(minOf(want, out.size()))
             } else {
-                chainBytes(e.start, limit)
+                chain(e.start, want)
             }
         }
 
-        private fun sectorOffset(s: Int) = (s + 1).toLong() * sectorSize
+        private fun sector(s: Int): ByteArray? {
+            if (s < 0 || s >= sectorCount) return null
+            val b = ByteArray(sectorSize)
+            raf.seek((s + 1).toLong() * sectorSize)
+            raf.readFully(b)
+            return b
+        }
 
         private fun readFat(): IntArray {
             val difat = ArrayList<Int>()
-            for (i in 0 until 109) difat.add(bb.getInt(0x4C + i * 4))
-            var next = bb.getInt(0x44)
-            var guard = 0
-            while (next >= 0 && guard++ < 10_000) {
-                val off = sectorOffset(next).toInt()
-                if (off + sectorSize > data.size) break
-                for (i in 0 until sectorSize / 4 - 1) difat.add(bb.getInt(off + i * 4))
-                next = bb.getInt(off + sectorSize - 4)
+            for (i in 0 until 109) difat.add(hb.getInt(0x4C + i * 4))
+            var next = hb.getInt(0x44)
+            val seen = BitSet()
+            while (next >= 0 && !seen[next]) {
+                seen.set(next)
+                val b = sector(next) ?: break
+                val w = ByteBuffer.wrap(b).order(ByteOrder.LITTLE_ENDIAN)
+                for (i in 0 until sectorSize / 4 - 1) difat.add(w.getInt(i * 4))
+                next = w.getInt(sectorSize - 4)
             }
-            val out = ArrayList<Int>()
+            // The FAT never needs more entries than the file has sectors.
+            val out = IntArray(sectorCount) { -1 }
+            var n = 0
             for (s in difat) {
-                if (s < 0) continue
-                val off = sectorOffset(s).toInt()
-                if (off + sectorSize > data.size) continue
-                for (i in 0 until sectorSize / 4) out.add(bb.getInt(off + i * 4))
+                if (n >= out.size) break
+                val b = sector(s) ?: continue
+                val w = ByteBuffer.wrap(b).order(ByteOrder.LITTLE_ENDIAN)
+                for (i in 0 until sectorSize / 4) {
+                    if (n >= out.size) break
+                    out[n++] = w.getInt(i * 4)
+                }
             }
-            return out.toIntArray()
+            return out
         }
 
-        private fun chainBytes(start: Int, limit: Int = Int.MAX_VALUE): ByteArray {
-            val out = java.io.ByteArrayOutputStream()
+        private fun chain(start: Int, limit: Int): ByteArray {
+            val out = ByteArrayOutputStream()
+            val seen = BitSet()
             var s = start
-            var guard = 0
-            while (s >= 0 && out.size() < limit && guard++ < 1_000_000) {
-                val off = sectorOffset(s).toInt()
-                if (off + sectorSize > data.size) break
-                out.write(data, off, sectorSize)
+            while (s >= 0 && out.size() < limit && !seen[s]) {
+                seen.set(s)
+                out.write(sector(s) ?: break)
                 s = fat.getOrElse(s) { -2 }
             }
             return out.toByteArray()
@@ -138,7 +163,7 @@ object Encryption {
         }
 
         private fun readDirectory(): List<Entry> {
-            val dir = chainBytes(bb.getInt(0x30))
+            val dir = chain(hb.getInt(0x30), MAX_TABLE_BYTES)
             val w = ByteBuffer.wrap(dir).order(ByteOrder.LITTLE_ENDIAN)
             return (0 until dir.size / 128).map { i ->
                 val o = i * 128
@@ -149,14 +174,20 @@ object Encryption {
         }
 
         companion object {
+            private const val MAX_TABLE_BYTES = 4 shl 20 // directory / mini FAT
+            private const val MAX_MINI_STREAM = 8 shl 20
             private val MAGIC = byteArrayOf(0xD0.toByte(), 0xCF.toByte(), 0x11, 0xE0.toByte(), 0xA1.toByte(), 0xB1.toByte(), 0x1A, 0xE1.toByte())
 
             fun open(file: File): Cfb? {
-                if (file.length() < 512 || file.length() > 200L * 1024 * 1024) return null
+                if (file.length() < 1024) return null
+                val raf = RandomAccessFile(file, "r")
                 val head = ByteArray(8)
-                RandomAccessFile(file, "r").use { it.readFully(head) }
-                if (!head.contentEquals(MAGIC)) return null
-                return Cfb(file.readBytes())
+                raf.readFully(head)
+                if (!head.contentEquals(MAGIC)) {
+                    raf.close()
+                    return null
+                }
+                return runCatching { Cfb(raf) }.getOrElse { raf.close(); null }
             }
         }
     }

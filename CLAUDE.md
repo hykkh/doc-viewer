@@ -1,4 +1,4 @@
-# doc-viewer — 폰 문서뷰어 (폴라리스오피스 대용)
+# doc-viewer — Hoffice: 폰 문서뷰어 (폴라리스오피스 대용)
 
 ## 목적
 안드로이드 폰에서 인터넷 없이 HWP·HWPX·DOC·DOCX·XLS·XLSX·PPT·PPTX·PDF(+ODF·RTF·CSV·TXT·그림)를 보는 앱.
@@ -39,6 +39,11 @@ JDK 17, SDK 34, NDK 27.1.12297006, CMake 3.22.1 (`libdvlok.so` 빌드용).
    → `wasm-bindgen 0.2.127 --target web` → `rhwp.js`, `rhwp_bg.wasm` 를 assets 에 복사. (Rust 1.93.1 GNU 툴체인)
 7. HWP → PDF 공유는 WebView 인쇄(`android.print.PdfPrint`)로 만든다. 모양은 같지만 **PDF 안 글자 검색은 안 됨**.
 8. 디버그 빌드는 16KB 페이지 경고가 뜬다(LibreOffice .so 가 4KB 정렬). 4KB 폰(갤럭시 S24 등)은 정상, 16KB 전용 폰에선 LO 엔진이 안 뜰 수 있음.
+
+9. **pdf.js 6 은 `convertToViewportRectangle` 이 없다** → `convertToViewportPoint` 두 번. (0.1.0 에선 이 때문에 PDF·오피스 찾기가 늘 "없음")
+10. 변환 PDF 는 `*.part` 에 쓰고 성공 시 rename(깨진 캐시 방지). 뷰어는 작업 id 로 요청, 엔진이 실제 시작할 때 `RESULT_STARTED` 를 받아 제한시간을 센다. 뷰어가 닫히면 `ACTION_CANCEL`. 엔진은 60초 놀면 스스로 종료.
+11. ViewerActivity 는 export 되어 있으므로 file:// 는 공용 저장소의 일반 파일만 받는다(앱 내부 파일 유출 방지). 가져오기는 1GB 상한, 임시파일은 가져오기마다 따로.
+12. 쪽 크기는 A4 폭 기준(PDF 595pt, rhwp 794px)으로 맞춘다 — 작은 쪽(두 줄짜리 시트)이 화면 가득 확대되지 않게. CSV/TSV 는 LibreOffice 를 거치지 않고 앱이 직접 표로 그린다.
 
 ## 시험 장치
 - `OfficeService` 는 `android.permission.DUMP` 보유자(= adb shell)에게만 export. `--ez batch true` 로

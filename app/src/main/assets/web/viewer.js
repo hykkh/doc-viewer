@@ -52,13 +52,20 @@ const highlights = new Map();
 
 let pages = null; // set by setupPages
 
-function setupPages(sizes, draw, release) {
-  const w = pageWidthCss();
+// refWidth: an A4 page's width in the document's units. An A4 page fills the
+// screen width; smaller pages (a two-row CSV sheet) keep that same scale instead
+// of being blown up, and wider ones are fitted to the screen.
+function setupPages(sizes, draw, release, refWidth) {
+  function sizeSlot(el, s) {
+    const screenW = pageWidthCss();
+    const w = Math.min(screenW, Math.round(s.w * screenW / refWidth));
+    el.style.width = w + 'px';
+    el.style.height = Math.round(w * s.h / s.w) + 'px';
+  }
   const slots = sizes.map((s, i) => {
     const d = document.createElement('div');
     d.className = 'page';
-    d.style.width = w + 'px';
-    d.style.height = Math.round(w * s.h / s.w) + 'px';
+    sizeSlot(d, s);
     d.dataset.i = i;
     d.innerHTML = `<div class="ph">${i + 1}</div>`;
     pagesEl.appendChild(d);
@@ -117,13 +124,51 @@ function setupPages(sizes, draw, release) {
       if (en.isIntersecting) visible.add(i); else visible.delete(i);
     }
     if (visible.size) {
+      // `visible` includes a screen of margin above and below (for preloading).
       current = Math.min(...visible);
-      pageNumEl.textContent = `${current + 1} / ${slots.length}`;
-      for (let i = current - 1; i <= current + KEEP; i++) ensure(i);
+      for (let i = current - 1; i <= current + KEEP * 2; i++) ensure(i);
       trim();
     }
   }, { rootMargin: '100% 0px' });
   slots.forEach((s) => io.observe(s.el));
+
+  // The page counter shows the page under the middle of the screen.
+  function updateCounter() {
+    const mid = window.innerHeight / 2;
+    let lo = 0, hi = slots.length - 1;
+    while (lo < hi) {
+      const m = (lo + hi) >> 1;
+      if (slots[m].el.getBoundingClientRect().bottom < mid) lo = m + 1; else hi = m;
+    }
+    pageNumEl.textContent = `${lo + 1} / ${slots.length}`;
+  }
+  let counterQueued = false;
+  window.addEventListener('scroll', () => {
+    if (counterQueued) return;
+    counterQueued = true;
+    requestAnimationFrame(() => { counterQueued = false; updateCounter(); });
+  }, { passive: true });
+
+  // Rotation: re-fit pages to the new width, keeping the reading position.
+  // Drawn pages stretch with the box (canvas/img are width:100%).
+  let lastW = document.documentElement.clientWidth;
+  window.addEventListener('resize', () => {
+    const nw = document.documentElement.clientWidth;
+    if (nw === lastW) return;
+    lastW = nw;
+    const at = parseInt(pageNumEl.textContent, 10) - 1 || 0;
+    slots.forEach((s, i) => {
+      sizeSlot(s.el, sizes[i]);
+      // Redraw at the new size (a canvas drawn for portrait is blurry in landscape).
+      if (s.drawn) {
+        release(i, s.el);
+        s.el.innerHTML = `<div class="ph">${i + 1}</div>`;
+        s.drawn = false;
+      }
+    });
+    pages.scrollTo(at);
+    for (let i = at - 1; i <= at + KEEP; i++) ensure(i);
+  });
 
   pageNumEl.style.display = 'block';
   pageNumEl.textContent = `1 / ${slots.length}`;
@@ -133,7 +178,8 @@ function setupPages(sizes, draw, release) {
     count: slots.length,
     // Scroll so page i (and optionally y in page units) sits near the top.
     scrollTo(i, y) {
-      const s = slots[Math.max(0, Math.min(i, slots.length - 1))];
+      i = Math.max(0, Math.min(i, slots.length - 1));
+      const s = slots[i];
       const k = s.el.clientWidth / sizes[i].w;
       const top = s.el.getBoundingClientRect().top + window.scrollY + (y ? y * k - 120 : -8);
       window.scrollTo({ top: Math.max(0, top) });
@@ -144,12 +190,14 @@ function setupPages(sizes, draw, release) {
   };
 }
 
-pageNumEl.addEventListener('click', () => {
+// Page jump: the number is asked in the app's own dialog (prompt() would show the page URL).
+window.gotoPage = (n) => { if (pages && n >= 1 && n <= pages.count) pages.scrollTo(n - 1); };
+window.askJump = () => {
   if (!pages) return;
-  const v = prompt(`이동할 쪽 (1~${pages.count})`);
-  const n = parseInt(v, 10);
-  if (n >= 1 && n <= pages.count) pages.scrollTo(n - 1);
-});
+  if (bridge.askPage) { bridge.askPage(pages.count); return; }
+  window.gotoPage(parseInt(prompt(`이동할 쪽 (1~${pages.count})`), 10));
+};
+pageNumEl.addEventListener('click', () => window.askJump());
 
 // ---- search ------------------------------------------------------------------
 // Each opener sets `searcher` to async (query) → [{ page, rects: [{x,y,w,h}] }].
@@ -218,9 +266,8 @@ window.preparePrint = async () => {
     if (!printSource) throw new Error('이 문서는 PDF로 만들 수 없습니다');
     const { sizes, render } = printSource;
     const w = sizes[0].w, h = sizes[0].h;
-    let box = document.getElementById('print');
-    if (box) box.remove();
-    box = document.createElement('div');
+    window.cleanupPrint();
+    const box = document.createElement('div');
     box.id = 'print';
     const style = document.createElement('style');
     style.textContent = `@page { size: ${w}px ${h}px; margin: 0; }
@@ -243,8 +290,17 @@ window.preparePrint = async () => {
     }
     bridge.onPrintReady(w, h);
   } catch (e) {
+    window.cleanupPrint();
     bridge.onPrintFail((e && e.message) || String(e));
   }
+};
+
+// Drops the print-only page images once the PDF is written.
+window.cleanupPrint = () => {
+  const box = document.getElementById('print');
+  if (!box) return;
+  box.querySelectorAll('img').forEach((img) => URL.revokeObjectURL(img.src));
+  box.remove();
 };
 
 // ---- PDF ---------------------------------------------------------------------
@@ -301,7 +357,7 @@ async function openPdf() {
     if (t) t.cancel();
     const c = el.querySelector('canvas');
     if (c) { c.width = 0; c.height = 0; }
-  });
+  }, 595); // A4 width in PDF points
 
   // Text per page, joined across items so a word split over runs still matches.
   const textCache = new Map();
@@ -340,7 +396,9 @@ async function openPdf() {
           const fontH = it.height || Math.hypot(it.transform[2], it.transform[3]);
           const x1 = x0 + it.width * (a / it.str.length);
           const x2 = x0 + it.width * (b / it.str.length);
-          const [l, t, r, bt] = vp.convertToViewportRectangle([x1, y0 - fontH * 0.2, x2, y0 + fontH * 0.9]);
+          // (pdf.js 6 dropped convertToViewportRectangle; map the two corners.)
+          const [l, t] = vp.convertToViewportPoint(x1, y0 - fontH * 0.2);
+          const [r, bt] = vp.convertToViewportPoint(x2, y0 + fontH * 0.9);
           rects.push({ x: Math.min(l, r), y: Math.min(t, bt), w: Math.abs(r - l), h: Math.abs(bt - t) });
         }
         if (rects.length) out.push({ page: i, rects });
@@ -356,20 +414,20 @@ async function openPdf() {
 
 async function openHwp() {
   const worker = new Worker('./hwp-worker.js', { type: 'module' });
-  const waiting = new Map(); // page index → {resolve, reject}
-  const searches = new Map();
+  // Requests carry their own id: the screen and the PDF printer can ask for
+  // the same page at the same time, and both must get an answer.
+  const waiting = new Map(); // request id → {resolve, reject}
+  let nextId = 0;
   let opened = null;
 
   worker.onmessage = (ev) => {
     const m = ev.data;
-    if (m.type === 'page' || m.type === 'pageError') {
-      const w = waiting.get(m.i);
-      waiting.delete(m.i);
-      if (w) m.type === 'page' ? w.resolve(m.svg) : w.reject(new Error(m.message));
-    } else if (m.type === 'found') {
-      const r = searches.get(m.id);
-      searches.delete(m.id);
-      if (r) r(m.hits);
+    if (m.id !== undefined && waiting.has(m.id)) {
+      const w = waiting.get(m.id);
+      waiting.delete(m.id);
+      if (m.type === 'page') w.resolve(m.svg);
+      else if (m.type === 'found') w.resolve(m.hits);
+      else w.reject(new Error(m.message));
     } else if (opened) {
       opened(m);
     }
@@ -393,16 +451,13 @@ async function openHwp() {
   const n = sizes.length;
   if (!n) throw new Error('쪽이 없습니다');
 
-  const render = (i) => new Promise((resolve, reject) => {
-    waiting.set(i, { resolve, reject });
-    worker.postMessage({ type: 'render', i });
+  const ask = (msg) => new Promise((resolve, reject) => {
+    const id = ++nextId;
+    waiting.set(id, { resolve, reject });
+    worker.postMessage({ ...msg, id });
   });
-  let searchId = 0;
-  searcher = (q) => new Promise((resolve) => {
-    const id = ++searchId;
-    searches.set(id, resolve);
-    worker.postMessage({ type: 'search', id, q });
-  });
+  const render = (i) => ask({ type: 'render', i });
+  searcher = (q) => ask({ type: 'search', q });
 
   printSource = { sizes, render };
 
@@ -423,7 +478,7 @@ async function openHwp() {
   }, (i) => {
     const u = urls.get(i);
     if (u) { URL.revokeObjectURL(u); urls.delete(i); }
-  });
+  }, 794); // A4 width in rhwp px (96dpi)
   bridge.onReady(n);
 }
 
@@ -447,12 +502,51 @@ async function openText() {
   } catch {
     text = new TextDecoder('euc-kr').decode(data); // old Korean text files
   }
-  const pre = document.createElement('div');
-  pre.id = 'text';
-  pre.textContent = text.replace(/^﻿/, '');
+  text = text.replace(/^﻿/, '');
   msgEl.style.display = 'none';
-  pagesEl.appendChild(pre);
+  const ext = src.split('.').pop().toLowerCase();
+  if (ext === 'csv' || ext === 'tsv') {
+    pagesEl.appendChild(csvTable(text, ext === 'tsv' ? '\t' : ','));
+  } else {
+    const pre = document.createElement('div');
+    pre.id = 'text';
+    pre.textContent = text;
+    pagesEl.appendChild(pre);
+  }
   bridge.onReady(1);
+}
+
+// CSV/TSV as a table (quoted fields, "" escapes, line breaks inside quotes).
+function csvTable(text, sep) {
+  const rows = [];
+  let row = [], field = '', quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '"' && text[i + 1] === '"') { field += '"'; i++; }
+      else if (c === '"') quoted = false;
+      else field += c;
+    } else if (c === '"' && field === '') quoted = true;
+    else if (c === sep) { row.push(field); field = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(field); rows.push(row); row = []; field = '';
+    } else field += c;
+  }
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+
+  const wrap = document.createElement('div');
+  wrap.id = 'sheet';
+  const table = document.createElement('table');
+  rows.slice(0, 20000).forEach((r, ri) => {
+    const tr = table.insertRow();
+    const th = document.createElement('th');
+    th.textContent = ri + 1;
+    tr.appendChild(th);
+    r.forEach((v) => { tr.insertCell().textContent = v; });
+  });
+  wrap.appendChild(table);
+  return wrap;
 }
 
 const openers = { pdf: openPdf, hwp: openHwp, image: openImage, text: openText };

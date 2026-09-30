@@ -34,7 +34,6 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="content" />
-                <data android:scheme="file" />
                 <data android:mimeType="application/pdf" />
                 <data android:mimeType="application/x-hwp" />
                 <data android:mimeType="application/haansofthwp" />

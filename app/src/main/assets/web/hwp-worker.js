@@ -58,17 +58,18 @@ self.onmessage = async (ev) => {
       }
       self.postMessage({ type: 'opened', sizes });
     } else if (m.type === 'render') {
-      self.postMessage({ type: 'page', i: m.i, svg: doc.renderPageSvg(m.i) });
+      self.postMessage({ type: 'page', id: m.id, svg: doc.renderPageSvg(m.i) });
     } else if (m.type === 'search') {
       self.postMessage({ type: 'found', id: m.id, hits: search(m.q) });
     }
   } catch (e) {
     const message = (e && e.message) ? e.message : String(e);
+    // Replies to render/search carry the request id; only 'open' has none.
     self.postMessage({
-      type: m.type === 'render' ? 'pageError' : 'error',
-      i: m.i,
+      type: 'error',
+      id: m.id,
       message,
-      needPassword: /비밀번호|password/i.test(message),
+      needPassword: m.type === 'open' && /비밀번호|password/i.test(message),
     });
   }
 };
