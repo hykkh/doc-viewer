@@ -35,8 +35,10 @@ object Updater {
     fun current() = BuildConfig.VERSION_CODE
 
     /** Network; off the main thread. Null when the server cannot be reached. */
-    fun fetch(): Release? = runCatching {
-        val c = URL("$SERVER/api/version?app=${License.APP}").openConnection() as HttpURLConnection
+    fun fetch(ctx: Context): Release? = runCatching {
+        // Saying who we are lets the owner's page show when this phone was last seen and on which version.
+        val who = if (License.valid(ctx)) "&device=${License.deviceId(ctx)}&ver=${BuildConfig.VERSION_NAME}" else ""
+        val c = URL("$SERVER/api/version?app=${License.APP}$who").openConnection() as HttpURLConnection
         try {
             c.connectTimeout = 15000
             c.readTimeout = 15000
@@ -52,7 +54,7 @@ object Updater {
     fun checkIfDue(ctx: Context): Release? {
         val p = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         if (System.currentTimeMillis() - p.getLong("checked", 0) >= CHECK_EVERY_MS) {
-            fetch()?.let { r ->
+            fetch(ctx)?.let { r ->
                 p.edit().putLong("checked", System.currentTimeMillis()).putString("version", r.version)
                     .putInt("code", r.code).putInt("min", r.minCode).putString("url", r.url).putInt("size", r.sizeMb).apply()
             }

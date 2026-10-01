@@ -161,6 +161,7 @@ class ActivationActivity : AppCompatActivity() {
             // Keep asking while this screen is open: the owner may still change his mind.
             "rejected" -> state.text = "승인되지 않았습니다."
             "revoked" -> state.text = "사용이 중지된 기기입니다. 관리자에게 문의해 주세요."
+            "closed" -> { state.text = "지금은 새 사용 신청을 받지 않습니다. 관리자에게 문의해 주세요."; return true }
             else -> { state.text = ""; return true }
         }
         return false

@@ -91,11 +91,11 @@ object License {
     /** Network; call off the main thread. */
     fun request(ctx: Context, name: String): Answer {
         prefs(ctx).edit().putBoolean("requested", true).putString("name", name).apply()
-        val body = JSONObject().put("app", APP).put("device", deviceId(ctx)).put("name", name).put("model", model())
+        val body = JSONObject().put("app", APP).put("device", deviceId(ctx)).put("name", name).put("model", model()).put("ver", BuildConfig.VERSION_NAME)
         return call("$SERVER/api/request", body.toString())
     }
 
-    fun status(ctx: Context): Answer = call("$SERVER/api/status?app=$APP&device=${deviceId(ctx)}", null)
+    fun status(ctx: Context): Answer = call("$SERVER/api/status?app=$APP&device=${deviceId(ctx)}&ver=${BuildConfig.VERSION_NAME}", null)
 
     private fun call(url: String, post: String?): Answer {
         val c = URL(url).openConnection() as HttpURLConnection
