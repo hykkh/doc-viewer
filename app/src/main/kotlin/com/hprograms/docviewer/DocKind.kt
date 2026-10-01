@@ -45,13 +45,21 @@ object DocKinds {
         if (startsWith("<?xml") && ext == "hml") return DocKind.HWP
         // Some PDFs carry junk before the header; readers accept it within the first 1KB.
         if (ext == "pdf" || headerWithin(file, "%PDF-", 1024)) return DocKind.PDF
-        if (ext in imageExt || isImageMagic(head, n)) return DocKind.IMAGE
+        if (ext in imageExt || isImageMagic(head, n) || isHeif(file)) return DocKind.IMAGE
         if (ext in hwpExt) return DocKind.HWP
         if (ext in textExt) return DocKind.TEXT
         if (ext in officeExt) return DocKind.OFFICE
         // Unknown: LibreOffice has the widest type detection.
         return DocKind.OFFICE
     }
+
+    /** HEIC/HEIF (iPhone photos): an ISO-BMFF "ftyp" box with a HEIF brand. */
+    fun isHeif(file: File): Boolean = runCatching {
+        val h = ByteArray(12)
+        val n = RandomAccessFile(file, "r").use { it.read(h) }
+        n == 12 && String(h, 4, 4, Charsets.ISO_8859_1) == "ftyp" &&
+            String(h, 8, 4, Charsets.ISO_8859_1) in setOf("heic", "heix", "hevc", "heim", "heis", "mif1", "msf1")
+    }.getOrDefault(false)
 
     private fun headerWithin(file: File, sig: String, limit: Int): Boolean {
         val buf = ByteArray(minOf(file.length(), limit.toLong()).toInt())

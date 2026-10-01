@@ -31,6 +31,12 @@ open class OfficeService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onCreate() {
+        super.onCreate()
+        // A process started only to deliver a cancel (or restarted by the system) has no work.
+        main.postDelayed(idleExit, IDLE_EXIT_MS)
+    }
+
     private val main = Handler(Looper.getMainLooper())
     private val cancelled = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val pending = java.util.concurrent.atomic.AtomicInteger()
@@ -40,10 +46,23 @@ open class OfficeService : Service() {
         if (pending.get() == 0) android.os.Process.killProcess(android.os.Process.myPid())
     }
 
+    // Jobs we have accepted (a viewer may resend one after this process restarted),
+    // and the one being converted right now.
+    private val known = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    @Volatile private var currentJob: String? = null
+
+    private fun die() = android.os.Process.killProcess(android.os.Process.myPid())
+
+    // A conversion that runs past this is stuck inside LibreOffice; nothing can
+    // interrupt it but ending the process. Viewers waiting in line resend.
+    private val stuck = Runnable { die() }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent == null) return START_NOT_STICKY
         if (intent.action == ACTION_CANCEL) {
-            intent.getStringExtra(EXTRA_JOB)?.let { cancelled.add(it) }
+            val id = intent.getStringExtra(EXTRA_JOB) ?: return START_NOT_STICKY
+            // Already running: the only way to stop LibreOffice is to end the process.
+            if (id == currentJob) die() else cancelled.add(id)
             return START_NOT_STICKY
         }
         if (intent.getBooleanExtra(EXTRA_BATCH, false)) {
@@ -51,6 +70,8 @@ open class OfficeService : Service() {
             val shards = intent.getIntExtra(EXTRA_SHARDS, 1)
             val pw = intent.getStringExtra(EXTRA_UNLOCK)
             val timeout = intent.getLongExtra(EXTRA_TIMEOUT_MS, BATCH_TIMEOUT_MS)
+            pending.incrementAndGet() // keeps the idle exit away while the batch runs
+            main.removeCallbacks(idleExit)
             worker.execute { runBatch(shard, shards, pw, timeout) }
             return START_NOT_STICKY
         }
@@ -60,6 +81,7 @@ open class OfficeService : Service() {
         val job = intent.getStringExtra(EXTRA_JOB) ?: ""
         val receiver = intent.getParcelableExtraCompat<ResultReceiver>(EXTRA_RECEIVER)
         if (input == null || output == null || receiver == null) return START_NOT_STICKY
+        if (!known.add(job)) return START_NOT_STICKY // duplicate resend
 
         pending.incrementAndGet()
         main.removeCallbacks(idleExit)
@@ -70,8 +92,19 @@ open class OfficeService : Service() {
                 receiver.send(RESULT_STARTED, null)
                 val t0 = System.currentTimeMillis()
                 val result = Bundle()
+                val out = File(output)
                 try {
-                    convert(File(input), File(output), password)
+                    // The same document may have been converted for another viewer meanwhile.
+                    if (!(out.exists() && out.length() > 0)) {
+                        currentJob = job
+                        main.postDelayed(stuck, STUCK_MS)
+                        try {
+                            convert(File(input), out, password)
+                        } finally {
+                            main.removeCallbacks(stuck)
+                            currentJob = null
+                        }
+                    }
                     result.putLong(KEY_MS, System.currentTimeMillis() - t0)
                     receiver.send(RESULT_OK, result)
                 } catch (e: Throwable) {
@@ -163,7 +196,6 @@ open class OfficeService : Service() {
 
     private fun convert(input: File, output: File, password: String?) {
         val o = ensureOffice()
-        output.delete()
         val part = File(output.path + ".part")
         part.delete()
         currentPassword = password
@@ -187,8 +219,7 @@ open class OfficeService : Service() {
             // Spreadsheets: one PDF page per sheet holding the whole sheet, so
             // wide tables are not chopped into print-sized strips — unless the
             // sheet is huge, where one giant page exhausts memory.
-            val singlePage = doc.documentType == Document.DOCTYPE_SPREADSHEET &&
-                doc.documentWidth * doc.documentHeight < MAX_SINGLE_PAGE_TWIPS2
+            val singlePage = doc.documentType == Document.DOCTYPE_SPREADSHEET && largestSheetArea(doc) < MAX_SINGLE_PAGE_TWIPS2
             val options = if (singlePage) {
                 """{"SinglePageSheets":{"type":"boolean","value":"true"}}"""
             } else {
@@ -210,6 +241,18 @@ open class OfficeService : Service() {
         }
     }
 
+    /** Document size in LOK is the active sheet's; the option applies to every sheet, so check them all. */
+    private fun largestSheetArea(doc: Document): Long {
+        val active = doc.part
+        var max = 0L
+        for (i in 0 until doc.parts) {
+            doc.setPart(i)
+            max = maxOf(max, doc.documentWidth * doc.documentHeight)
+        }
+        doc.setPart(active)
+        return max
+    }
+
     companion object {
         private const val TAG = "OfficeService"
         const val ACTION_CANCEL = "com.hprograms.docviewer.CANCEL"
@@ -226,6 +269,7 @@ open class OfficeService : Service() {
         private const val MAX_SINGLE_PAGE_TWIPS2 = 40L * 11906 * 16838
         private const val BATCH_TIMEOUT_MS = 30_000L
         private const val IDLE_EXIT_MS = 60_000L
+        private const val STUCK_MS = 200_000L
         const val KEY_LOCKED = "doc_locked"
         const val RESULT_STARTED = 3
         const val RESULT_OK = 1

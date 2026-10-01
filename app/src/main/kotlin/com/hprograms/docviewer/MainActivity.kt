@@ -44,7 +44,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tabPhone: TextView
     private val adapter = RowAdapter()
     private var tab = Tab.RECENT
-    private var phoneFiles: List<File>? = null
 
     private val pick = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) startActivity(Intent(this, ViewerActivity::class.java).setData(uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
@@ -52,6 +51,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        savedInstanceState?.getString("tab")?.let { tab = Tab.valueOf(it) }
         val pad = dp(16)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -106,6 +106,11 @@ class MainActivity : AppCompatActivity() {
             .setPositiveButton("확인", null)
             .show()
         return true
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putString("tab", tab.name)
     }
 
     override fun onResume() {
@@ -286,6 +291,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
+        // Last scan of the phone's documents; kept across rotation and re-entry.
+        private var phoneFiles: List<File>? = null
+
         private val DOC_EXTS = setOf(
             "hwp", "hwpx", "hwt", "hml", "pdf",
             "doc", "docx", "rtf", "odt", "xls", "xlsx", "xlsm", "csv", "ods",

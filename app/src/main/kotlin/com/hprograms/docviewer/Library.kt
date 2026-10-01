@@ -79,16 +79,19 @@ object Library {
             val id = if (ext != null) "$hash.$ext" else hash
             val dest = File(docsDir(ctx), id)
             synchronized(this) {
+                // Claim it before it appears, so a concurrent import's trim cannot delete it.
+                use(id, true)
                 if (dest.exists() || !tmp.renameTo(dest)) tmp.delete()
             }
-            val entry = DocEntry(id, name, DocKinds.detect(dest, name), size, System.currentTimeMillis())
-            use(id, true) // hold it while it is put on the list and trimmed
+            // On success the claim passes to the caller, who releases it with use(id, false).
             try {
+                val entry = DocEntry(id, name, DocKinds.detect(dest, name), size, System.currentTimeMillis())
                 touch(ctx, entry)
-            } finally {
+                return entry
+            } catch (t: Throwable) {
                 use(id, false)
+                throw t
             }
-            return entry
         } finally {
             tmp.delete()
         }
@@ -140,9 +143,15 @@ object Library {
     private fun trim(ctx: Context) {
         var keep = recent(ctx)
         val keepIds = keep.map { it.id }.toSet()
+        val now = System.currentTimeMillis()
         docsDir(ctx).listFiles()?.forEach { f ->
             val id = f.name
-            if (!id.startsWith("incoming") && id !in keepIds && id !in inUse) f.delete()
+            if (id.startsWith("incoming")) {
+                // Left over by an import that was killed midway.
+                if (now - f.lastModified() > 10 * 60_000L) f.delete()
+            } else if (id !in keepIds && id !in inUse) {
+                f.delete()
+            }
         }
         // One size per file, whatever names point at it; newest use decides its age.
         val files = keep.groupBy { it.id }.map { (id, es) -> Triple(id, es.first().size, es.maxOf { it.openedAt }) }

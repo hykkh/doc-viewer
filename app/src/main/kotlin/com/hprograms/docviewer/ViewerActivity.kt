@@ -55,6 +55,14 @@ class ViewerActivity : AppCompatActivity() {
     private var jobId: String? = null
     private var jobStarted = 0L
 
+    // The document finished loading in the page (HWP must be laid out before printing).
+    private var ready = false
+    // An HWP → PDF print is running; a second one would write the same file.
+    private var printing = false
+
+    // Decrypted PDF of a password document; deleted when this viewer closes.
+    private var lockedPdf: File? = null
+
     // The WebView renderer died (e.g. out of memory); the WebView must not be used again.
     private var webDead = false
 
@@ -64,19 +72,24 @@ class ViewerActivity : AppCompatActivity() {
 
         val uri = incomingUri(intent)
         val id = intent.getStringExtra(EXTRA_ENTRY_ID)
+        if (uri == null && id == null && intent.action == Intent.ACTION_SEND) {
+            // Text or a link was shared, not a file.
+            Toast.makeText(this, "파일만 열 수 있습니다", Toast.LENGTH_SHORT).show()
+            finish()
+            return
+        }
         lifecycleScope.launch {
             try {
                 val e = withContext(Dispatchers.IO) {
                     when {
                         id != null -> Library.recent(this@ViewerActivity).firstOrNull { it.id == id && it.name == intent.getStringExtra(EXTRA_ENTRY_NAME) }
-                            ?.also { Library.touch(this@ViewerActivity, it) }
+                            ?.also { Library.use(it.id, true); Library.touch(this@ViewerActivity, it) }
                             ?: throw IllegalStateException("최근 문서 목록에서 찾을 수 없습니다")
                         uri != null -> Library.import(this@ViewerActivity, checkUri(uri))
                         else -> throw IllegalStateException("열 파일이 없습니다")
                     }
                 }
                 entry = e
-                Library.use(e.id, true)
                 supportActionBar?.title = e.name
                 show(e)
             } catch (t: Throwable) {
@@ -166,9 +179,35 @@ class ViewerActivity : AppCompatActivity() {
         when (e.kind) {
             DocKind.PDF -> load(e.file(this), "pdf")
             DocKind.HWP -> load(e.file(this), "hwp")
-            DocKind.IMAGE -> load(e.file(this), "image")
+            DocKind.IMAGE -> showImage(e)
             DocKind.TEXT -> load(e.file(this), "text")
             DocKind.OFFICE -> convertThenLoad(e)
+        }
+    }
+
+    /** WebView cannot decode HEIC/HEIF (iPhone photos); turn those into JPEG first. */
+    private fun showImage(e: DocEntry) {
+        val f = e.file(this)
+        if (DocKinds.extOf(e.name) !in setOf("heic", "heif") && !DocKinds.isHeif(f)) {
+            load(f, "image")
+            return
+        }
+        lifecycleScope.launch {
+            val jpg = withContext(Dispatchers.IO) {
+                runCatching {
+                    val out = File(Library.pdfDir(this@ViewerActivity), e.id.substringBefore('.') + ".jpg")
+                    if (!out.exists()) {
+                        val bmp = if (android.os.Build.VERSION.SDK_INT >= 28) {
+                            android.graphics.ImageDecoder.decodeBitmap(android.graphics.ImageDecoder.createSource(f))
+                        } else {
+                            android.graphics.BitmapFactory.decodeFile(f.path)
+                        } ?: throw IllegalStateException("그림을 읽지 못했습니다")
+                        out.outputStream().use { bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 92, it) }
+                    }
+                    out
+                }
+            }
+            jpg.onSuccess { load(it, "image") }.onFailure { showError(it.message ?: "그림을 읽지 못했습니다") }
         }
     }
 
@@ -182,7 +221,13 @@ class ViewerActivity : AppCompatActivity() {
     }
 
     private fun convertThenLoad(e: DocEntry, password: String? = null) {
-        val pdf = Library.pdfFor(this, e)
+        // A document opened with a password is converted to a throwaway file:
+        // a decrypted copy in the shared cache would open next time without asking.
+        val pdf = if (password == null) {
+            Library.pdfFor(this, e)
+        } else {
+            File(Library.pdfDir(this), "locked-${UUID.randomUUID()}.pdf").also { lockedPdf = it }
+        }
         if (pdf.exists() && pdf.length() > 0) {
             load(pdf, "pdf")
             return
@@ -210,14 +255,44 @@ class ViewerActivity : AppCompatActivity() {
                 }
             }
         }
-        startService(
-            Intent(this, OfficeService::class.java)
-                .putExtra(OfficeService.EXTRA_JOB, id)
-                .putExtra(OfficeService.EXTRA_IN, e.file(this).absolutePath)
-                .putExtra(OfficeService.EXTRA_OUT, pdf.absolutePath)
-                .putExtra(OfficeService.EXTRA_RECEIVER, receiver)
-                .putExtra(OfficeService.EXTRA_UNLOCK, password),
-        )
+        val request = Intent(this, OfficeService::class.java)
+            .putExtra(OfficeService.EXTRA_JOB, id)
+            .putExtra(OfficeService.EXTRA_IN, e.file(this).absolutePath)
+            .putExtra(OfficeService.EXTRA_OUT, pdf.absolutePath)
+            .putExtra(OfficeService.EXTRA_RECEIVER, receiver)
+            .putExtra(OfficeService.EXTRA_UNLOCK, password)
+        if (runCatching { startService(request) }.isFailure) {
+            jobId = null
+            showError("문서 엔진을 시작하지 못했습니다. 다시 열어 주세요")
+            return
+        }
+        watchQueue(id, request, System.currentTimeMillis(), resent = false)
+    }
+
+    /**
+     * While our job waits in line, the engine process can die under it (another
+     * file crashed it, a timeout killed it, the system reclaimed it). Then no
+     * answer would ever come: resend once, and give up after that.
+     */
+    private fun watchQueue(id: String, request: Intent, since: Long, resent: Boolean) {
+        main.postDelayed({
+            if (jobId != id || !alive() || jobStarted != 0L) return@postDelayed
+            when {
+                System.currentTimeMillis() - since > QUEUE_LIMIT_MS -> {
+                    jobId = null
+                    showError("문서 엔진이 응답하지 않습니다")
+                }
+                officeProcessAlive(this) -> watchQueue(id, request, since, resent)
+                !resent -> {
+                    runCatching { startService(request) }
+                    watchQueue(id, request, since, resent = true)
+                }
+                else -> {
+                    jobId = null
+                    showError("문서 엔진이 멈췄습니다. 다시 열어 주세요")
+                }
+            }
+        }, 3000)
     }
 
     private fun askPassword(title: String, onCancel: () -> Unit = { finish() }, then: (String) -> Unit) {
@@ -351,12 +426,19 @@ class ViewerActivity : AppCompatActivity() {
 
         @JavascriptInterface
         fun onPrintFail(message: String) = ui {
+            printing = false
             setStatus(null)
             toast("PDF를 만들지 못했습니다: $message")
         }
 
         @JavascriptInterface
-        fun onReady(pages: Int) = ui { setStatus(null) }
+        fun onReady(pages: Int) = ui {
+            ready = true
+            setStatus(null)
+        }
+
+        @JavascriptInterface
+        fun toast(message: String) = ui { this@ViewerActivity.toast(message) }
 
         @JavascriptInterface
         fun onFail(message: String) = ui {
@@ -401,16 +483,25 @@ class ViewerActivity : AppCompatActivity() {
 
     private fun pdfName(e: DocEntry) = e.name.substringBeforeLast('.', e.name) + ".pdf"
 
+    /**
+     * A name that is harmless as a file name and fits the 255-byte limit
+     * (Korean takes 3 bytes a letter), keeping the extension.
+     */
+    private fun safeFileName(name: String): String {
+        val clean = name.replace(Regex("[/\\\\:*?\"<>|\\u0000-\\u001f]"), "_").trim().trimStart('.').ifEmpty { "document" }
+        val ext = clean.substringAfterLast('.', "").takeIf { it.isNotEmpty() && it.length <= 8 }?.let { ".$it" } ?: ""
+        var base = clean.removeSuffix(ext)
+        while (base.isNotEmpty() && (base + ext).toByteArray(Charsets.UTF_8).size > 200) base = base.dropLast(1)
+        return base.ifEmpty { "document" } + ext
+    }
+
     /** Hands [file] to other apps under the name [name]. The copy runs off the main thread. */
     private fun shareFile(file: File, name: String, send: Boolean) {
         lifecycleScope.launch {
             val out = withContext(Dispatchers.IO) {
                 runCatching {
                     val shareDir = File(cacheDir, "share").apply { deleteRecursively(); mkdirs() }
-                    // Keep the name readable but harmless as a file name.
-                    val safe = name.replace(Regex("[/\\\\:*?\"<>|\\u0000-\\u001f]"), "_").trim().trimStart('.')
-                        .ifEmpty { "document" }.take(120)
-                    File(shareDir, safe).also { file.copyTo(it, overwrite = true) }
+                    File(shareDir, safeFileName(name)).also { file.copyTo(it, overwrite = true) }
                 }.getOrNull()
             }
             if (out == null || !alive()) {
@@ -434,9 +525,14 @@ class ViewerActivity : AppCompatActivity() {
         val f = served
         when {
             f != null && loadedKind == "pdf" -> shareFile(f, pdfName(e), send = true)
-            loadedKind == "hwp" -> {
-                setStatus("PDF 만드는 중…")
-                js("window.preparePrint()")
+            loadedKind == "hwp" -> when {
+                !ready -> toast("문서를 여는 중입니다")
+                printing -> toast("PDF를 만드는 중입니다")
+                else -> {
+                    printing = true
+                    setStatus("PDF 만드는 중…")
+                    js("window.preparePrint()")
+                }
             }
             else -> toast("이 파일은 PDF로 만들 수 없습니다")
         }
@@ -452,12 +548,14 @@ class ViewerActivity : AppCompatActivity() {
             .setResolution(android.print.PrintAttributes.Resolution("r", "r", 600, 600))
             .setMinMargins(android.print.PrintAttributes.Margins.NO_MARGINS)
             .build()
-        val out = File(Library.pdfDir(this), "print-" + e.id.substringBefore('.') + ".pdf")
+        // One print file, overwritten each time (shareFile copies it out anyway).
+        val out = File(Library.pdfDir(this), "print.pdf")
         val adapter = web.createPrintDocumentAdapter(e.name)
         android.print.PdfPrint.write(adapter, attrs, out) { err ->
             main.post {
                 // The print-only page images are no longer needed.
                 js("window.cleanupPrint && window.cleanupPrint()")
+                printing = false
                 if (!alive()) return@post
                 setStatus(null)
                 if (err == null && out.length() > 0) shareFile(out, pdfName(e), send = true)
@@ -470,9 +568,13 @@ class ViewerActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         // Tell the engine to skip our file if it has not started on it yet.
-        jobId?.let { startService(Intent(this, OfficeService::class.java).setAction(OfficeService.ACTION_CANCEL).putExtra(OfficeService.EXTRA_JOB, it)) }
+        jobId?.let {
+            // May be refused while we are in the background; the engine's own limit covers that.
+            runCatching { startService(Intent(this, OfficeService::class.java).setAction(OfficeService.ACTION_CANCEL).putExtra(OfficeService.EXTRA_JOB, it)) }
+        }
         jobId = null
         entry?.let { Library.use(it.id, false) }
+        lockedPdf?.delete()
         if (!webDead) web.destroy()
         super.onDestroy()
     }
@@ -482,6 +584,7 @@ class ViewerActivity : AppCompatActivity() {
         const val EXTRA_ENTRY_NAME = "entry_name"
         private const val HOST = "appassets.androidplatform.net"
         private const val CONVERT_TIMEOUT_SEC = 180
+        private const val QUEUE_LIMIT_MS = 10 * 60_000L
         private const val MENU_SHARE = 1
         private const val MENU_OPEN_WITH = 2
         private const val MENU_FIND = 3

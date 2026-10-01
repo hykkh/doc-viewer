@@ -62,6 +62,8 @@ function setupPages(sizes, draw, release, refWidth) {
     el.style.width = w + 'px';
     el.style.height = Math.round(w * s.h / s.w) + 'px';
   }
+  // gen counts how often a slot was reset (scrolled far away, rotated). A draw
+  // that finishes for an older gen is thrown away instead of shown or kept.
   const slots = sizes.map((s, i) => {
     const d = document.createElement('div');
     d.className = 'page';
@@ -69,11 +71,12 @@ function setupPages(sizes, draw, release, refWidth) {
     d.dataset.i = i;
     d.innerHTML = `<div class="ph">${i + 1}</div>`;
     pagesEl.appendChild(d);
-    return { el: d, drawn: false, busy: false };
+    return { el: d, drawn: false, busy: false, gen: 0 };
   });
 
   let current = 0;
   const visible = new Set();
+  const far = (i) => Math.abs(i - current) > KEEP * 2;
 
   function decorate(i) {
     const el = slots[i].el;
@@ -92,17 +95,35 @@ function setupPages(sizes, draw, release, refWidth) {
     }
   }
 
+  function reset(i) {
+    const s = slots[i];
+    s.gen++;
+    release(i, s.el); // also cancels a draw still in progress
+    s.el.innerHTML = `<div class="ph">${i + 1}</div>`;
+    s.drawn = false;
+  }
+
   async function ensure(i) {
     const s = slots[i];
-    if (!s || s.drawn || s.busy) return;
+    if (!s || s.drawn || s.busy || far(i)) return;
     s.busy = true;
+    const gen = s.gen;
     try {
       await draw(i, s.el);
+      if (gen !== s.gen || far(i)) {
+        // Outdated by now (scrolled away or resized while drawing).
+        s.busy = false;
+        reset(i);
+        ensure(i);
+        return;
+      }
       s.drawn = true;
       decorate(i);
     } catch (e) {
-      s.el.innerHTML = `<div class="ph">${i + 1}쪽 표시 오류</div>`;
-      console.error(e);
+      if (gen === s.gen) {
+        s.el.innerHTML = `<div class="ph">${i + 1}쪽 표시 오류</div>`;
+        console.error(e);
+      }
     } finally {
       s.busy = false;
     }
@@ -110,11 +131,7 @@ function setupPages(sizes, draw, release, refWidth) {
 
   function trim() {
     slots.forEach((s, i) => {
-      if (s.drawn && Math.abs(i - current) > KEEP * 2) {
-        release(i, s.el);
-        s.el.innerHTML = `<div class="ph">${i + 1}</div>`;
-        s.drawn = false;
-      }
+      if ((s.drawn || s.busy) && far(i)) reset(i);
     });
   }
 
@@ -126,21 +143,25 @@ function setupPages(sizes, draw, release, refWidth) {
     if (visible.size) {
       // `visible` includes a screen of margin above and below (for preloading).
       current = Math.min(...visible);
-      for (let i = current - 1; i <= current + KEEP * 2; i++) ensure(i);
       trim();
+      for (let i = current - 1; i <= current + KEEP * 2; i++) ensure(i);
     }
   }, { rootMargin: '100% 0px' });
   slots.forEach((s) => io.observe(s.el));
 
-  // The page counter shows the page under the middle of the screen.
-  function updateCounter() {
+  // The page under the middle of the screen, and how far down it we are (0..1).
+  function readingPosition() {
     const mid = window.innerHeight / 2;
     let lo = 0, hi = slots.length - 1;
     while (lo < hi) {
       const m = (lo + hi) >> 1;
       if (slots[m].el.getBoundingClientRect().bottom < mid) lo = m + 1; else hi = m;
     }
-    pageNumEl.textContent = `${lo + 1} / ${slots.length}`;
+    const r = slots[lo].el.getBoundingClientRect();
+    return { i: lo, frac: Math.min(1, Math.max(0, (mid - r.top) / Math.max(1, r.height))) };
+  }
+  function updateCounter() {
+    pageNumEl.textContent = `${readingPosition().i + 1} / ${slots.length}`;
   }
   let counterQueued = false;
   window.addEventListener('scroll', () => {
@@ -149,25 +170,23 @@ function setupPages(sizes, draw, release, refWidth) {
     requestAnimationFrame(() => { counterQueued = false; updateCounter(); });
   }, { passive: true });
 
-  // Rotation: re-fit pages to the new width, keeping the reading position.
-  // Drawn pages stretch with the box (canvas/img are width:100%).
+  // Rotation: re-fit pages to the new width and redraw them at the new size,
+  // keeping the reading position within the page.
   let lastW = document.documentElement.clientWidth;
   window.addEventListener('resize', () => {
     const nw = document.documentElement.clientWidth;
     if (nw === lastW) return;
     lastW = nw;
-    const at = parseInt(pageNumEl.textContent, 10) - 1 || 0;
+    const pos = readingPosition();
     slots.forEach((s, i) => {
       sizeSlot(s.el, sizes[i]);
-      // Redraw at the new size (a canvas drawn for portrait is blurry in landscape).
-      if (s.drawn) {
-        release(i, s.el);
-        s.el.innerHTML = `<div class="ph">${i + 1}</div>`;
-        s.drawn = false;
-      }
+      if (s.drawn || s.busy) reset(i);
     });
-    pages.scrollTo(at);
-    for (let i = at - 1; i <= at + KEEP; i++) ensure(i);
+    const el = slots[pos.i].el;
+    const top = el.getBoundingClientRect().top + window.scrollY + pos.frac * el.offsetHeight - window.innerHeight / 2;
+    window.scrollTo({ top: Math.max(0, top) });
+    current = pos.i;
+    for (let i = pos.i - 1; i <= pos.i + KEEP; i++) ensure(i);
   });
 
   pageNumEl.style.display = 'block';
@@ -223,34 +242,54 @@ function showHit(idx) {
   if (hits[idx]) pages.scrollTo(hits[idx].page, hits[idx].rects[0].y);
 }
 
+let searchSeq = 0;
+let lastQuery = '';
+
 async function runSearch() {
   const q = qEl.value.trim();
   if (!q || !searcher || !pages) return;
+  const my = ++searchSeq; // a newer search, or closing the bar, makes this one stale
+  lastQuery = q;
   countEl.textContent = '찾는 중…';
+  let found;
   try {
-    hits = await searcher(q);
+    found = await searcher(q);
   } catch (e) {
-    hits = [];
+    found = [];
     console.error(e);
   }
+  if (my !== searchSeq || bar.style.display === 'none') return;
+  hits = found;
   showHit(hits.length ? 0 : -1);
 }
 
 qEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { qEl.blur(); runSearch(); }
 });
-document.getElementById('next').onclick = () => { if (hits.length) showHit((hitIdx + 1) % hits.length); };
-document.getElementById('prev').onclick = () => { if (hits.length) showHit((hitIdx - 1 + hits.length) % hits.length); };
+function step(d) {
+  if (qEl.value.trim() !== lastQuery) { runSearch(); return; }
+  if (hits.length) showHit((hitIdx + d + hits.length) % hits.length);
+}
+document.getElementById('next').onclick = () => step(1);
+document.getElementById('prev').onclick = () => step(-1);
 document.getElementById('close').onclick = () => {
+  searchSeq++;
   bar.style.display = 'none';
   hits = [];
   highlights.clear();
   if (pages) pages.redecorate();
 };
 
+function notify(msg) {
+  if (bridge.toast) bridge.toast(msg); else console.log(msg);
+}
+
 // Called from the app's search menu.
 window.showSearch = () => {
-  if (!searcher) { alert('이 파일은 찾기를 지원하지 않습니다'); return; }
+  if (!searcher) {
+    notify(kind === 'pdf' || kind === 'hwp' ? '문서를 여는 중입니다' : '이 파일은 찾기를 지원하지 않습니다');
+    return;
+  }
   bar.style.display = 'flex';
   qEl.focus();
 };
@@ -269,20 +308,36 @@ window.preparePrint = async () => {
     window.cleanupPrint();
     const box = document.createElement('div');
     box.id = 'print';
+    // Each distinct page size gets a named @page, so landscape pages print on
+    // landscape paper instead of being shrunk onto the first page's size.
+    const names = new Map();
+    let pageRules = '';
+    for (const s of sizes) {
+      const key = `${Math.round(s.w)}x${Math.round(s.h)}`;
+      if (!names.has(key)) {
+        names.set(key, `p${names.size}`);
+        pageRules += `@page p${names.size - 1} { size: ${s.w}px ${s.h}px; margin: 0; }\n`;
+      }
+    }
     const style = document.createElement('style');
     style.textContent = `@page { size: ${w}px ${h}px; margin: 0; }
+      ${pageRules}
       @media print {
         body > *:not(#print) { display: none !important; }
         #print { display: block !important; }
         html, body { background: #fff; }
       }
       #print { display: none; }
-      #print img { display: block; width: ${w}px; height: ${h}px; object-fit: contain; break-after: page; }`;
+      #print img { display: block; object-fit: contain; break-after: page; }`;
     box.appendChild(style);
     document.body.appendChild(box);
     for (let i = 0; i < sizes.length; i++) {
       const svg = await render(i);
       const img = new Image();
+      const s = sizes[i];
+      img.style.width = `${s.w}px`;
+      img.style.height = `${s.h}px`;
+      img.style.page = names.get(`${Math.round(s.w)}x${Math.round(s.h)}`);
       img.src = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
       await img.decode().catch(() => {});
       box.appendChild(img);
@@ -497,10 +552,15 @@ async function openImage() {
 async function openText() {
   const data = await fetchBytes();
   let text;
-  try {
-    text = new TextDecoder('utf-8', { fatal: true }).decode(data);
-  } catch {
-    text = new TextDecoder('euc-kr').decode(data); // old Korean text files
+  // A byte-order mark names the encoding (Excel's "Unicode text" is UTF-16LE).
+  if (data[0] === 0xFF && data[1] === 0xFE) text = new TextDecoder('utf-16le').decode(data);
+  else if (data[0] === 0xFE && data[1] === 0xFF) text = new TextDecoder('utf-16be').decode(data);
+  else {
+    try {
+      text = new TextDecoder('utf-8', { fatal: true }).decode(data);
+    } catch {
+      text = new TextDecoder('euc-kr').decode(data); // old Korean text files
+    }
   }
   text = text.replace(/^﻿/, '');
   msgEl.style.display = 'none';
@@ -538,7 +598,14 @@ function csvTable(text, sep) {
   const wrap = document.createElement('div');
   wrap.id = 'sheet';
   const table = document.createElement('table');
-  rows.slice(0, 20000).forEach((r, ri) => {
+  const MAX_ROWS = 20000;
+  if (rows.length > MAX_ROWS) {
+    const note = document.createElement('div');
+    note.className = 'note';
+    note.textContent = `전체 ${rows.length.toLocaleString()}행 중 앞 ${MAX_ROWS.toLocaleString()}행만 표시합니다`;
+    wrap.appendChild(note);
+  }
+  rows.slice(0, MAX_ROWS).forEach((r, ri) => {
     const tr = table.insertRow();
     const th = document.createElement('th');
     th.textContent = ri + 1;

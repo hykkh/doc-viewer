@@ -18,7 +18,18 @@ import java.util.BitSet
  */
 object Encryption {
 
-    fun isEncrypted(file: File): Boolean = runCatching {
+    fun isEncrypted(file: File): Boolean = odfEncrypted(file) || oleEncrypted(file)
+
+    // ODF (odt/ods/odp) keeps its encryption notes in META-INF/manifest.xml.
+    private fun odfEncrypted(file: File): Boolean = runCatching {
+        java.util.zip.ZipFile(file).use { z ->
+            val m = z.getEntry("META-INF/manifest.xml") ?: return@use false
+            if (m.size > 4L shl 20) return@use false
+            z.getInputStream(m).use { String(it.readBytes()).contains("encryption-data") }
+        }
+    }.getOrDefault(false)
+
+    private fun oleEncrypted(file: File): Boolean = runCatching {
         Cfb.open(file)?.use { cfb ->
             val names = cfb.streamNames()
             when {

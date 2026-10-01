@@ -45,6 +45,15 @@ JDK 17, SDK 34, NDK 27.1.12297006, CMake 3.22.1 (`libdvlok.so` 빌드용).
 11. ViewerActivity 는 export 되어 있으므로 file:// 는 공용 저장소의 일반 파일만 받는다(앱 내부 파일 유출 방지). 가져오기는 1GB 상한, 임시파일은 가져오기마다 따로.
 12. 쪽 크기는 A4 폭 기준(PDF 595pt, rhwp 794px)으로 맞춘다 — 작은 쪽(두 줄짜리 시트)이 화면 가득 확대되지 않게. CSV/TSV 는 LibreOffice 를 거치지 않고 앱이 직접 표로 그린다.
 
+13. **실행 중인 변환은 취소 = 프로세스 종료**(LibreOffice 는 중간에 멈출 수 없음). 뷰어 CANCEL 이 currentJob 이면 die(), 서비스 자체도 200초 상한.
+    대기열 뷰어는 3초마다 :office 생존 확인 → 죽었으면 같은 job 1회 재전송(서비스는 같은 id 무시), 10분 대기 상한.
+    프로세스는 onCreate 부터 60초 무작업이면 스스로 종료(배치 모드는 pending 으로 막음).
+14. 엑셀 SinglePageSheets 판정은 **모든 시트** 면적 최댓값(LOK 크기는 활성 시트만 줌).
+15. 비밀번호로 연 오피스 문서는 `cache/pdf/locked-<uuid>.pdf` 에 쓰고 뷰어 닫을 때 삭제 — 공용 캐시에 복호화본을 남기지 않는다. 암호 ODF 는 manifest.xml 의 encryption-data 로 판별.
+16. HWP→PDF 인쇄는 쪽 크기별 named @page(`img.style.page`)로 가로 쪽을 가로 용지에. 인쇄 중 재요청·로딩 전 요청은 막는다.
+17. viewer.js 쪽 슬롯에 gen(세대) — 멀어지거나 회전으로 리셋된 쪽의 늦게 끝난 그리기는 버린다. 찾기에는 searchSeq.
+18. HEIC/HEIF 는 WebView 가 못 읽어 ImageDecoder 로 JPEG 변환 후 표시. UTF-16 텍스트는 BOM 으로 판별.
+
 ## 시험 장치
 - `OfficeService` 는 `android.permission.DUMP` 보유자(= adb shell)에게만 export. `--ez batch true` 로
   `files/batch/order.txt` 목록을 폰 안에서 연속 변환, 결과는 `files/batch/result.tsv`. `OfficeService2/3` 로 3병렬.
