@@ -1,5 +1,7 @@
 // Document renderer inside the app's WebView.
-// Query: kind = pdf | hwp | image | text, src = URL of the document bytes.
+// Query: kind = pdf | hwp | image | text, src = URL of the document bytes,
+// optional meta = URL of a JSON sidecar (sheet names), pos = "page:frac" to
+// resume at, night = 1 for night mode.
 // Reports back through window.Android (see ViewerActivity.JsBridge).
 
 const params = new URLSearchParams(location.search);
@@ -24,6 +26,10 @@ function askPassword(message) {
   });
 }
 
+function notify(msg) {
+  if (bridge.toast) bridge.toast(msg); else console.log(msg);
+}
+
 function fail(e) {
   const m = (e && e.message) ? e.message : String(e);
   msgEl.style.display = 'block';
@@ -41,6 +47,11 @@ function pageWidthCss() {
   return Math.min(document.documentElement.clientWidth - 12, 1000);
 }
 
+// ---- night mode ----------------------------------------------------------------
+
+window.setNight = (on) => document.body.classList.toggle('night', !!on);
+if (params.get('night') === '1') window.setNight(true);
+
 // ---- lazy page machinery shared by pdf and hwp ------------------------------
 // Each page gets a sized placeholder; content is drawn when it nears the
 // viewport and dropped again when far away, so 500-page files stay light.
@@ -51,6 +62,12 @@ const KEEP = 4; // pages kept alive on each side of the visible one
 const highlights = new Map();
 
 let pages = null; // set by setupPages
+
+// What an opener provides beyond drawing (all optional):
+//   pageImage(i, cssWidth) → canvas      for thumbnails, slides, "page as image"
+//   pageText(i) → string                  for read-aloud and the text index
+//   outline() → [{title, page, depth}]    table of contents
+const doc = { pageImage: null, pageText: null, outline: null, count: 0 };
 
 // refWidth: an A4 page's width in the document's units. An A4 page fills the
 // screen width; smaller pages (a two-row CSV sheet) keep that same scale instead
@@ -160,6 +177,11 @@ function setupPages(sizes, draw, release, refWidth) {
     const r = slots[lo].el.getBoundingClientRect();
     return { i: lo, frac: Math.min(1, Math.max(0, (mid - r.top) / Math.max(1, r.height))) };
   }
+  function scrollToPosition(pos) {
+    const el = slots[pos.i].el;
+    const top = el.getBoundingClientRect().top + window.scrollY + pos.frac * el.offsetHeight - window.innerHeight / 2;
+    window.scrollTo({ top: Math.max(0, top) });
+  }
   function updateCounter() {
     pageNumEl.textContent = `${readingPosition().i + 1} / ${slots.length}`;
   }
@@ -182,16 +204,14 @@ function setupPages(sizes, draw, release, refWidth) {
       sizeSlot(s.el, sizes[i]);
       if (s.drawn || s.busy) reset(i);
     });
-    const el = slots[pos.i].el;
-    const top = el.getBoundingClientRect().top + window.scrollY + pos.frac * el.offsetHeight - window.innerHeight / 2;
-    window.scrollTo({ top: Math.max(0, top) });
+    scrollToPosition(pos);
     current = pos.i;
     for (let i = pos.i - 1; i <= pos.i + KEEP; i++) ensure(i);
   });
 
   pageNumEl.style.display = 'block';
   pageNumEl.textContent = `1 / ${slots.length}`;
-  ensure(0);
+  doc.count = slots.length;
 
   pages = {
     count: slots.length,
@@ -206,20 +226,65 @@ function setupPages(sizes, draw, release, refWidth) {
     redecorate() {
       slots.forEach((s, i) => { if (s.drawn) decorate(i); });
     },
+    position: readingPosition,
+    restore(pos) {
+      if (!pos || pos.i >= slots.length) return;
+      current = pos.i;
+      scrollToPosition(pos);
+    },
   };
+
+  // Resume where the reader left off last time.
+  const saved = (params.get('pos') || '').split(':');
+  if (saved.length === 2) pages.restore({ i: parseInt(saved[0], 10) || 0, frac: parseFloat(saved[1]) || 0 });
+  ensure(current);
 }
+
+// Report the reading position when scrolling settles, for "resume where I was".
+let posTimer = null;
+window.addEventListener('scroll', () => {
+  clearTimeout(posTimer);
+  posTimer = setTimeout(() => {
+    if (!bridge.savePos) return;
+    if (pages) {
+      const p = pages.position();
+      bridge.savePos(`${p.i}:${p.frac.toFixed(3)}`);
+    } else {
+      const h = document.documentElement.scrollHeight - window.innerHeight;
+      bridge.savePos(`y:${h > 0 ? (window.scrollY / h).toFixed(4) : 0}`);
+    }
+  }, 600);
+}, { passive: true });
+
+window.currentPage = () => (pages ? pages.position().i : 0);
 
 // Page jump: the number is asked in the app's own dialog (prompt() would show the page URL).
 window.gotoPage = (n) => { if (pages && n >= 1 && n <= pages.count) pages.scrollTo(n - 1); };
 window.askJump = () => {
-  if (!pages) return;
+  if (!pages) { notify('쪽이 없는 문서입니다'); return; }
   if (bridge.askPage) { bridge.askPage(pages.count); return; }
   window.gotoPage(parseInt(prompt(`이동할 쪽 (1~${pages.count})`), 10));
 };
 pageNumEl.addEventListener('click', () => window.askJump());
 
+// ---- double tap: zoom in / back out (done by the app's WebView) --------------------
+
+let lastTap = { t: 0, x: 0, y: 0 };
+pagesEl.addEventListener('touchend', (e) => {
+  if (e.touches.length || e.changedTouches.length !== 1) return;
+  const t = e.changedTouches[0];
+  const now = e.timeStamp;
+  if (now - lastTap.t < 300 && Math.hypot(t.clientX - lastTap.x, t.clientY - lastTap.y) < 30) {
+    lastTap.t = 0;
+    if (bridge.doubleTap) bridge.doubleTap(t.clientX, t.clientY);
+  } else {
+    lastTap = { t: now, x: t.clientX, y: t.clientY };
+  }
+}, { passive: true });
+
 // ---- search ------------------------------------------------------------------
-// Each opener sets `searcher` to async (query) → [{ page, rects: [{x,y,w,h}] }].
+// Each opener sets `searcher` to async (query) → hits. Page hits are
+// { page, rects: [{x,y,w,h}] }; text-view hits are { el } (a <mark>).
 
 let searcher = null;
 let hits = [];
@@ -230,24 +295,30 @@ const qEl = document.getElementById('q');
 const countEl = document.getElementById('count');
 
 function showHit(idx) {
+  hitIdx = idx;
+  countEl.textContent = hits.length ? `${idx + 1} / ${hits.length}` : '없음';
+  if (hits.length && hits[0].el) {
+    hits.forEach((h, n) => h.el.classList.toggle('cur', n === idx));
+    if (hits[idx]) hits[idx].el.scrollIntoView({ block: 'center' });
+    return;
+  }
   highlights.clear();
   hits.forEach((h, n) => {
     const list = highlights.get(h.page) || [];
     h.rects.forEach((r) => list.push({ ...r, current: n === idx }));
     highlights.set(h.page, list);
   });
-  hitIdx = idx;
-  countEl.textContent = hits.length ? `${idx + 1} / ${hits.length}` : '없음';
   pages.redecorate();
   if (hits[idx]) pages.scrollTo(hits[idx].page, hits[idx].rects[0].y);
 }
 
 let searchSeq = 0;
 let lastQuery = '';
+let clearSearch = () => {};
 
 async function runSearch() {
   const q = qEl.value.trim();
-  if (!q || !searcher || !pages) return;
+  if (!q || !searcher) return;
   const my = ++searchSeq; // a newer search, or closing the bar, makes this one stale
   lastQuery = q;
   countEl.textContent = '찾는 중…';
@@ -277,33 +348,221 @@ document.getElementById('close').onclick = () => {
   bar.style.display = 'none';
   hits = [];
   highlights.clear();
+  clearSearch();
   if (pages) pages.redecorate();
 };
-
-function notify(msg) {
-  if (bridge.toast) bridge.toast(msg); else console.log(msg);
-}
 
 // Called from the app's search menu.
 window.showSearch = () => {
   if (!searcher) {
-    notify(kind === 'pdf' || kind === 'hwp' ? '문서를 여는 중입니다' : '이 파일은 찾기를 지원하지 않습니다');
+    notify(kind === 'image' ? '그림에서는 찾기를 할 수 없습니다' : '문서를 여는 중입니다');
     return;
   }
   bar.style.display = 'flex';
   qEl.focus();
 };
 
-// ---- print (HWP → PDF) ----------------------------------------------------------
-// The app prints this page to a PDF file (ViewerActivity.sharePdf). Lazy pages
-// are not all drawn, so lay out every page in a print-only container first.
+// ---- overlays: table of contents, page thumbnails, slideshow ------------------
 
-let printSource = null; // { sizes, render(i) → svg } for HWP
+const overlay = document.getElementById('overlay');
+function openOverlay(title, body) {
+  overlay.innerHTML = '';
+  const head = document.createElement('div');
+  head.className = 'ov-head';
+  head.innerHTML = `<span>${title}</span><button aria-label="닫기">✕</button>`;
+  head.querySelector('button').onclick = closeOverlay;
+  overlay.appendChild(head);
+  overlay.appendChild(body);
+  overlay.style.display = 'flex';
+  document.body.classList.add('ov-open');
+  if (bridge.onOverlay) bridge.onOverlay(true);
+}
+function closeOverlay() {
+  overlay.style.display = 'none';
+  overlay.innerHTML = '';
+  document.body.classList.remove('ov-open');
+  if (bridge.onOverlay) bridge.onOverlay(false);
+}
+// Back button: leave the slideshow (keeping its page) or close the open overlay.
+window.closeAny = () => {
+  if (window.__slidesEnd) window.endSlides();
+  else if (overlay.style.display === 'flex') closeOverlay();
+};
 
-window.preparePrint = async () => {
+window.showOutline = async () => {
+  if (!pages) { notify('쪽이 없는 문서입니다'); return; }
+  const items = doc.outline ? await doc.outline() : [];
+  if (!items.length) { notify('이 문서에는 목차가 없습니다'); return; }
+  const list = document.createElement('div');
+  list.className = 'ov-list';
+  for (const it of items) {
+    const row = document.createElement('button');
+    row.className = 'ov-row';
+    row.style.paddingLeft = `${14 + it.depth * 16}px`;
+    row.innerHTML = `<span></span><em>${it.page + 1}</em>`;
+    row.firstChild.textContent = it.title;
+    row.onclick = () => { closeOverlay(); pages.scrollTo(it.page); };
+    list.appendChild(row);
+  }
+  openOverlay('목차', list);
+};
+
+window.showThumbs = () => {
+  if (!pages || !doc.pageImage) { notify('쪽이 없는 문서입니다'); return; }
+  const grid = document.createElement('div');
+  grid.className = 'ov-grid';
+  const cur = pages.position().i;
+  const tileW = Math.floor((document.documentElement.clientWidth - 40) / 3);
+  const io = new IntersectionObserver((entries) => {
+    for (const en of entries) {
+      if (!en.isIntersecting || en.target.dataset.done) continue;
+      en.target.dataset.done = '1';
+      const i = Number(en.target.dataset.i);
+      doc.pageImage(i, tileW).then((c) => {
+        const box = en.target.querySelector('.tb');
+        box.innerHTML = '';
+        box.appendChild(c);
+      }).catch(() => {});
+    }
+  }, { root: overlay, rootMargin: '200px 0px' });
+  for (let i = 0; i < pages.count; i++) {
+    const t = document.createElement('button');
+    t.className = i === cur ? 'tile cur' : 'tile';
+    t.dataset.i = i;
+    t.innerHTML = `<div class="tb"></div><span>${i + 1}</span>`;
+    t.onclick = () => { closeOverlay(); pages.scrollTo(i); };
+    grid.appendChild(t);
+    io.observe(t);
+  }
+  openOverlay(`쪽 보기 (${pages.count}쪽)`, grid);
+  setTimeout(() => grid.children[cur] && grid.children[cur].scrollIntoView({ block: 'center' }), 50);
+};
+
+// One page at a time, full screen; swipe or tap the sides to move.
+window.startSlides = () => {
+  if (!pages || !doc.pageImage) { notify('쪽이 없는 문서입니다'); return; }
+  let at = pages.position().i;
+  const stage = document.createElement('div');
+  stage.className = 'slides';
+  const counter = document.createElement('div');
+  counter.className = 'slide-n';
+  stage.appendChild(counter);
+  let drawn = 0;
+  async function show(i) {
+    at = Math.max(0, Math.min(pages.count - 1, i));
+    counter.textContent = `${at + 1} / ${pages.count}`;
+    const my = ++drawn;
+    const W = window.innerWidth, H = window.innerHeight;
+    const c = await doc.pageImage(at, W * 2);
+    if (my !== drawn) return;
+    const k = Math.min(W / c.width, H / c.height);
+    c.style.width = `${c.width * k}px`;
+    c.style.height = `${c.height * k}px`;
+    stage.querySelectorAll('canvas').forEach((x) => x.remove());
+    stage.insertBefore(c, counter);
+  }
+  let sx = 0, sy = 0;
+  stage.addEventListener('touchstart', (e) => { sx = e.touches[0].clientX; sy = e.touches[0].clientY; }, { passive: true });
+  stage.addEventListener('touchend', (e) => {
+    const t = e.changedTouches[0];
+    const dx = t.clientX - sx, dy = t.clientY - sy;
+    if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) show(at + (dx < 0 ? 1 : -1));
+    else if (Math.abs(dx) < 10 && Math.abs(dy) < 10) {
+      if (t.clientX > window.innerWidth * 0.66) show(at + 1);
+      else if (t.clientX < window.innerWidth * 0.33) show(at - 1);
+    }
+  }, { passive: true });
+  overlay.innerHTML = '';
+  overlay.appendChild(stage);
+  overlay.style.display = 'flex';
+  document.body.classList.add('ov-open');
+  if (bridge.onOverlay) bridge.onOverlay(true);
+  window.__slidesEnd = () => { pages.scrollTo(at); };
+  show(at);
+};
+window.endSlides = () => {
+  if (window.__slidesEnd) window.__slidesEnd();
+  window.__slidesEnd = null;
+  closeOverlay();
+};
+
+// ---- the current page as a picture (to send over a messenger) -------------------
+
+window.sharePageImage = async () => {
+  if (!pages || !doc.pageImage) { notify('쪽이 없는 문서입니다'); return; }
+  const i = pages.position().i;
+  try {
+    const c = await doc.pageImage(i, 1600);
+    const ctx = c.getContext('2d');
+    // Pages are transparent where empty; put white behind them.
+    ctx.globalCompositeOperation = 'destination-over';
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, c.width, c.height);
+    bridge.savePng(i + 1, c.toDataURL('image/png').split(',')[1]);
+  } catch (e) {
+    notify('쪽 그림을 만들지 못했습니다');
+  }
+};
+
+// ---- page text for read-aloud and the search index -----------------------------
+
+window.speakPage = async (i) => {
+  if (!doc.pageText || i >= doc.count) { bridge.onPageText(-1, ''); return; }
+  let t = '';
+  try { t = await doc.pageText(i); } catch { t = ''; }
+  bridge.onPageText(i, t || '');
+};
+
+// After opening, collect all text (quietly, a page at a time) so the app can
+// find this document by its contents later.
+async function indexText() {
+  if (!bridge.saveText || !doc.pageText) return;
+  await new Promise((r) => setTimeout(r, 3000));
+  let all = '';
+  for (let i = 0; i < doc.count && all.length < 2_000_000; i++) {
+    try { all += (await doc.pageText(i)) + '\n'; } catch { /* skip page */ }
+    if (i % 5 === 4) await new Promise((r) => setTimeout(r, 30));
+  }
+  bridge.saveText(all);
+}
+
+// ---- sheet tabs (spreadsheets converted one sheet per page) ----------------------
+
+async function showSheetTabs() {
+  const metaUrl = params.get('meta');
+  if (!metaUrl) return;
+  try {
+    const meta = await (await fetch(metaUrl)).json();
+    const sheets = meta.sheets || [];
+    if (sheets.length < 2) return;
+    const tabs = document.getElementById('tabs');
+    sheets.forEach((s) => {
+      const b = document.createElement('button');
+      b.textContent = s.name;
+      b.onclick = () => {
+        tabs.querySelectorAll('button').forEach((x) => x.classList.remove('on'));
+        b.classList.add('on');
+        pages.scrollTo(s.page);
+      };
+      tabs.appendChild(b);
+    });
+    tabs.firstChild.classList.add('on');
+    tabs.style.display = 'flex';
+    document.body.classList.add('has-tabs');
+  } catch { /* no tabs */ }
+}
+
+// ---- print (HWP → PDF / printer) -------------------------------------------------
+// The app prints this page (ViewerActivity). Lazy pages are not all drawn, so
+// lay out every page in a print-only container first. Pages are inline SVG so
+// their text stays text in the PDF (searchable, copyable).
+
+let printSource = null; // { sizes, svg(i) → prefixed inline svg string } for HWP
+
+window.preparePrint = async (mode) => {
   try {
     if (!printSource) throw new Error('이 문서는 PDF로 만들 수 없습니다');
-    const { sizes, render } = printSource;
+    const { sizes, svg } = printSource;
     const w = sizes[0].w, h = sizes[0].h;
     window.cleanupPrint();
     const box = document.createElement('div');
@@ -326,36 +585,35 @@ window.preparePrint = async () => {
         body > *:not(#print) { display: none !important; }
         #print { display: block !important; }
         html, body { background: #fff; }
+        body.night #print { filter: none; }
       }
       #print { display: none; }
-      #print img { display: block; object-fit: contain; break-after: page; }`;
+      #print .pp { display: block; overflow: hidden; break-after: page; }
+      #print .pp > svg { display: block; width: 100%; height: 100%; }`;
     box.appendChild(style);
     document.body.appendChild(box);
     for (let i = 0; i < sizes.length; i++) {
-      const svg = await render(i);
-      const img = new Image();
       const s = sizes[i];
-      img.style.width = `${s.w}px`;
-      img.style.height = `${s.h}px`;
-      img.style.page = names.get(`${Math.round(s.w)}x${Math.round(s.h)}`);
-      img.src = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
-      await img.decode().catch(() => {});
-      box.appendChild(img);
+      const d = document.createElement('div');
+      d.className = 'pp';
+      d.style.width = `${s.w}px`;
+      d.style.height = `${s.h}px`;
+      d.style.page = names.get(`${Math.round(s.w)}x${Math.round(s.h)}`);
+      d.innerHTML = await svg(i, `q${i}`);
+      box.appendChild(d);
       if (bridge.onPrintProgress) bridge.onPrintProgress(i + 1, sizes.length);
     }
-    bridge.onPrintReady(w, h);
+    bridge.onPrintReady(w, h, mode || 'pdf');
   } catch (e) {
     window.cleanupPrint();
     bridge.onPrintFail((e && e.message) || String(e));
   }
 };
 
-// Drops the print-only page images once the PDF is written.
+// Drops the print-only pages once the PDF is written.
 window.cleanupPrint = () => {
   const box = document.getElementById('print');
-  if (!box) return;
-  box.querySelectorAll('img').forEach((img) => URL.revokeObjectURL(img.src));
-  box.remove();
+  if (box) box.remove();
 };
 
 // ---- PDF ---------------------------------------------------------------------
@@ -377,17 +635,25 @@ async function openPdf() {
     if (pw === null) { task.destroy(); fail('비밀번호 입력 취소'); return; }
     update(pw);
   };
-  const doc = await task.promise;
+  const pdf = await task.promise;
   const sizes = [];
-  for (let i = 1; i <= doc.numPages; i++) {
-    const p = await doc.getPage(i);
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const p = await pdf.getPage(i);
     const v = p.getViewport({ scale: 1 });
     sizes.push({ w: v.width, h: v.height });
   }
   msgEl.style.display = 'none';
+
+  // Destination (named or explicit) → page index.
+  async function destPage(dest) {
+    const d = typeof dest === 'string' ? await pdf.getDestination(dest) : dest;
+    if (!Array.isArray(d) || !d.length) return null;
+    return typeof d[0] === 'number' ? d[0] : pdf.getPageIndex(d[0]);
+  }
+
   const tasks = new Map();
   setupPages(sizes, async (i, el) => {
-    const page = await doc.getPage(i + 1);
+    const page = await pdf.getPage(i + 1);
     const cssW = el.clientWidth;
     const base = page.getViewport({ scale: 1 });
     // Render sharper than the screen so pinch-zoom stays readable, but cap the
@@ -407,6 +673,42 @@ async function openPdf() {
     tasks.delete(i);
     el.innerHTML = '';
     el.appendChild(c);
+
+    // Selectable text over the picture, and tappable links.
+    const cssVp = page.getViewport({ scale: cssW / base.width });
+    el.style.setProperty('--total-scale-factor', cssVp.scale);
+    el.style.setProperty('--scale-round-x', '1px');
+    el.style.setProperty('--scale-round-y', '1px');
+    const tl = document.createElement('div');
+    tl.className = 'textLayer';
+    el.appendChild(tl);
+    try {
+      await new pdfjs.TextLayer({ textContentSource: page.streamTextContent(), container: tl, viewport: cssVp }).render();
+    } catch { /* picture only */ }
+    try {
+      for (const a of await page.getAnnotations({ intent: 'display' })) {
+        if (a.subtype !== 'Link' || (!a.url && !a.dest)) continue;
+        const [x1, y1] = cssVp.convertToViewportPoint(a.rect[0], a.rect[1]);
+        const [x2, y2] = cssVp.convertToViewportPoint(a.rect[2], a.rect[3]);
+        const link = document.createElement('a');
+        link.className = 'lnk';
+        link.style.left = `${Math.min(x1, x2)}px`;
+        link.style.top = `${Math.min(y1, y2)}px`;
+        link.style.width = `${Math.abs(x2 - x1)}px`;
+        link.style.height = `${Math.abs(y2 - y1)}px`;
+        if (a.url) {
+          link.href = a.url;
+        } else {
+          link.href = '#';
+          link.onclick = async (ev) => {
+            ev.preventDefault();
+            const p = await destPage(a.dest);
+            if (p !== null) pages.scrollTo(p);
+          };
+        }
+        el.appendChild(link);
+      }
+    } catch { /* no links */ }
   }, (i, el) => {
     const t = tasks.get(i);
     if (t) t.cancel();
@@ -414,11 +716,61 @@ async function openPdf() {
     if (c) { c.width = 0; c.height = 0; }
   }, 595); // A4 width in PDF points
 
+  doc.pageImage = async (i, cssWidth) => {
+    const page = await pdf.getPage(i + 1);
+    const base = page.getViewport({ scale: 1 });
+    let scale = cssWidth / base.width;
+    if (base.width * base.height * scale * scale > 16e6) scale = Math.sqrt(16e6 / (base.width * base.height));
+    const vp = page.getViewport({ scale });
+    const c = document.createElement('canvas');
+    c.width = Math.floor(vp.width);
+    c.height = Math.floor(vp.height);
+    await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+    return c;
+  };
+
+  doc.outline = async () => {
+    const out = [];
+    async function walk(items, depth) {
+      for (const it of items || []) {
+        const p = it.dest ? await destPage(it.dest).catch(() => null) : null;
+        if (p !== null) out.push({ title: it.title, page: p, depth });
+        await walk(it.items, depth + 1);
+      }
+    }
+    await walk(await pdf.getOutline(), 0);
+    if (out.length) return out;
+    // No bookmarks (common for converted Word files): lines set clearly larger
+    // than the body text are taken as headings.
+    const lines = [];
+    const chars = new Map();
+    for (let i = 0; i < pdf.numPages && i < 600; i++) {
+      const tc = await (await pdf.getPage(i + 1)).getTextContent();
+      let cur = null;
+      for (const it of tc.items) {
+        if (!it.str) continue;
+        const size = Math.round((it.height || Math.hypot(it.transform[2], it.transform[3])) * 2) / 2;
+        const y = it.transform[5];
+        if (cur && Math.abs(cur.y - y) < 1 && cur.size === size) cur.text += it.str;
+        else { cur = { text: it.str, size, y, page: i }; lines.push(cur); }
+        chars.set(size, (chars.get(size) || 0) + it.str.length);
+      }
+    }
+    let body = 0, most = 0;
+    for (const [s, n] of chars) if (n > most) { most = n; body = s; }
+    const heads = lines.filter((l) => {
+      const t = l.text.trim();
+      return l.size >= body * 1.25 && t.length <= 60 && (t.match(/[가-힣A-Za-z]/g) || []).length >= 2;
+    });
+    const levels = [...new Set(heads.map((h) => h.size))].sort((a, b) => b - a);
+    return heads.slice(0, 300).map((h) => ({ title: h.text.trim(), page: h.page, depth: Math.min(2, levels.indexOf(h.size)) }));
+  };
+
   // Text per page, joined across items so a word split over runs still matches.
   const textCache = new Map();
   async function pageText(i) {
     if (textCache.has(i)) return textCache.get(i);
-    const page = await doc.getPage(i + 1);
+    const page = await pdf.getPage(i + 1);
     const vp = page.getViewport({ scale: 1 });
     const tc = await page.getTextContent();
     let str = '';
@@ -427,16 +779,18 @@ async function openPdf() {
       if (!it.str) continue;
       spans.push({ start: str.length, end: str.length + it.str.length, it });
       str += it.str;
-      if (it.hasEOL) str += ' ';
+      if (it.hasEOL) str += '\n';
     }
-    const v = { str: str.toLowerCase(), spans, vp };
+    const v = { raw: str, str: str.toLowerCase(), spans, vp };
     textCache.set(i, v);
     return v;
   }
+  doc.pageText = async (i) => (await pageText(i)).raw;
+
   searcher = async (q) => {
     const needle = q.toLowerCase();
     const out = [];
-    for (let i = 0; i < doc.numPages && out.length < 1000; i++) {
+    for (let i = 0; i < pdf.numPages && out.length < 1000; i++) {
       const { str, spans, vp } = await pageText(i);
       let at = str.indexOf(needle);
       while (at >= 0) {
@@ -462,10 +816,21 @@ async function openPdf() {
     }
     return out;
   };
-  bridge.onReady(doc.numPages);
+  showSheetTabs();
+  bridge.onReady(pdf.numPages);
+  indexText();
 }
 
 // ---- HWP / HWPX --------------------------------------------------------------
+
+// Page SVGs reuse element ids (clip paths, gradients). To place several in one
+// document — on screen and in the print container — give each page's ids a prefix.
+function prefixIds(svg, p) {
+  return svg
+    .replace(/\bid="([^"]+)"/g, `id="${p}-$1"`)
+    .replace(/url\(#([^)]+)\)/g, `url(#${p}-$1)`)
+    .replace(/href="#([^"]+)"/g, `href="#${p}-$1"`);
+}
 
 async function openHwp() {
   const worker = new Worker('./hwp-worker.js', { type: 'module' });
@@ -482,11 +847,14 @@ async function openHwp() {
       waiting.delete(m.id);
       if (m.type === 'page') w.resolve(m.svg);
       else if (m.type === 'found') w.resolve(m.hits);
+      else if (m.type === 'text') w.resolve(m.text);
+      else if (m.type === 'outline') w.resolve(m.items);
       else w.reject(new Error(m.message));
     } else if (opened) {
       opened(m);
     }
   };
+  worker.onerror = (e) => { if (opened) opened({ type: 'error', message: e.message || '한글 엔진 오류' }); };
   const open = (password) => new Promise((resolve) => {
     opened = resolve;
     worker.postMessage({ type: 'open', src, password });
@@ -513,28 +881,39 @@ async function openHwp() {
   });
   const render = (i) => ask({ type: 'render', i });
   searcher = (q) => ask({ type: 'search', q });
+  const inlineSvg = async (i, p) => prefixIds(await render(i), p);
 
-  printSource = { sizes, render };
+  printSource = { sizes, svg: inlineSvg };
 
-  msgEl.style.display = 'none';
-  const urls = new Map();
-  setupPages(sizes, async (i, el) => {
-    // Each page as its own SVG image: page SVGs reuse element ids
-    // (clip paths etc.), so inlining several would make them collide.
+  doc.pageText = (i) => ask({ type: 'text', i });
+  doc.outline = () => ask({ type: 'outline' });
+  doc.pageImage = async (i, cssWidth) => {
     const svg = await render(i);
     const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
-    urls.set(i, url);
-    const img = new Image();
-    img.decoding = 'async';
-    img.src = url;
-    await img.decode().catch(() => {});
-    el.innerHTML = '';
-    el.appendChild(img);
-  }, (i) => {
-    const u = urls.get(i);
-    if (u) { URL.revokeObjectURL(u); urls.delete(i); }
-  }, 794); // A4 width in rhwp px (96dpi)
+    try {
+      const img = new Image();
+      img.src = url;
+      await img.decode();
+      const s = sizes[i];
+      const k = Math.min(cssWidth / s.w, Math.sqrt(16e6 / (s.w * s.h)));
+      const c = document.createElement('canvas');
+      c.width = Math.round(s.w * k);
+      c.height = Math.round(s.h * k);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      return c;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  };
+
+  msgEl.style.display = 'none';
+  setupPages(sizes, async (i, el) => {
+    // Inline SVG (ids prefixed per page): the text in it can be selected and copied.
+    const svg = await inlineSvg(i, `s${i}`);
+    el.innerHTML = svg;
+  }, () => {}, 794); // A4 width in rhwp px (96dpi)
   bridge.onReady(n);
+  indexText();
 }
 
 // ---- image / text ------------------------------------------------------------
@@ -565,15 +944,61 @@ async function openText() {
   text = text.replace(/^﻿/, '');
   msgEl.style.display = 'none';
   const ext = src.split('.').pop().toLowerCase();
+  let root;
   if (ext === 'csv' || ext === 'tsv') {
-    pagesEl.appendChild(csvTable(text, ext === 'tsv' ? '\t' : ','));
+    root = csvTable(text, ext === 'tsv' ? '\t' : ',');
   } else {
-    const pre = document.createElement('div');
-    pre.id = 'text';
-    pre.textContent = text;
-    pagesEl.appendChild(pre);
+    root = document.createElement('div');
+    root.id = 'text';
+    root.textContent = text;
+  }
+  pagesEl.appendChild(root);
+  textSearch(root);
+  doc.count = 1;
+  doc.pageText = async () => text;
+  // Resume position (fraction of the whole text).
+  const pos = params.get('pos') || '';
+  if (pos.startsWith('y:')) {
+    const f = parseFloat(pos.slice(2)) || 0;
+    requestAnimationFrame(() => window.scrollTo({ top: f * (document.documentElement.scrollHeight - window.innerHeight) }));
   }
   bridge.onReady(1);
+  indexText();
+}
+
+// Find in a text or table view: wrap matches in <mark>.
+function textSearch(root) {
+  clearSearch = () => {
+    root.querySelectorAll('mark').forEach((m) => m.replaceWith(document.createTextNode(m.textContent)));
+    root.normalize();
+  };
+  searcher = async (q) => {
+    clearSearch();
+    const needle = q.toLowerCase();
+    const found = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    for (const node of nodes) {
+      const lower = node.data.toLowerCase();
+      let at = lower.indexOf(needle);
+      let cur = node;
+      let offset = 0;
+      while (at >= 0 && found.length < 5000) {
+        const startInCur = at - offset;
+        const hit = cur.splitText(startInCur);
+        const rest = hit.splitText(needle.length);
+        const mark = document.createElement('mark');
+        hit.replaceWith(mark);
+        mark.appendChild(hit);
+        found.push({ el: mark });
+        cur = rest;
+        offset = at + needle.length;
+        at = lower.indexOf(needle, offset);
+      }
+    }
+    return found;
+  };
 }
 
 // CSV/TSV as a table (quoted fields, "" escapes, line breaks inside quotes).

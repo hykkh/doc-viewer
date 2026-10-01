@@ -32,6 +32,43 @@ object Library {
     fun docsDir(ctx: Context) = File(ctx.filesDir, "docs").apply { mkdirs() }
     fun pdfDir(ctx: Context) = File(ctx.cacheDir, "pdf").apply { mkdirs() }
 
+    fun textDir(ctx: Context) = File(ctx.filesDir, "text").apply { mkdirs() }
+    private fun textFile(ctx: Context, id: String) = File(textDir(ctx), id.substringBefore('.') + ".txt")
+
+    /** The document's text, gathered by the viewer, for finding it by content later. */
+    fun saveText(ctx: Context, id: String, text: String) {
+        runCatching { textFile(ctx, id).writeText(text) }
+    }
+
+    /** Ids of kept documents whose text contains [q] (case-insensitive). */
+    fun idsContaining(ctx: Context, q: String): Set<String> {
+        val needle = q.lowercase()
+        return recent(ctx).map { it.id }.distinct().filter { id ->
+            val f = textFile(ctx, id)
+            f.exists() && runCatching { f.readText().lowercase().contains(needle) }.getOrDefault(false)
+        }.toSet()
+    }
+
+    // ---- favourites (kept regardless of the size budget) ----
+
+    private const val KEY_FAV = "favorites"
+    private fun favKey(e: DocEntry) = e.id + "|" + e.name
+
+    @Synchronized
+    fun favorites(ctx: Context): Set<String> =
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getStringSet(KEY_FAV, emptySet()) ?: emptySet()
+
+    fun isFavorite(ctx: Context, e: DocEntry) = favKey(e) in favorites(ctx)
+
+    @Synchronized
+    fun setFavorite(ctx: Context, e: DocEntry, on: Boolean) {
+        val set = favorites(ctx).toMutableSet()
+        if (on) set.add(favKey(e)) else set.remove(favKey(e))
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putStringSet(KEY_FAV, set).commit()
+    }
+
+    private fun favoriteIds(ctx: Context) = favorites(ctx).map { it.substringBefore('|') }.toSet()
+
     /** Where the converted PDF of an office document is cached. */
     fun pdfFor(ctx: Context, e: DocEntry) = File(pdfDir(ctx), e.id.substringBefore('.') + ".pdf")
 
@@ -113,7 +150,9 @@ object Library {
     fun touch(ctx: Context, e: DocEntry) {
         val list = listOf(e.copy(openedAt = System.currentTimeMillis())) +
             recent(ctx).filter { it.id != e.id || it.name != e.name }
-        save(ctx, list.take(MAX_RECENT))
+        val fav = favorites(ctx)
+        // Keep the newest MAX_RECENT, plus any favourite that would fall off.
+        save(ctx, list.filterIndexed { i, x -> i < MAX_RECENT || favKey(x) in fav })
         trim(ctx)
     }
 
@@ -121,9 +160,11 @@ object Library {
     fun remove(ctx: Context, e: DocEntry) {
         val rest = recent(ctx).filter { !(it.id == e.id && it.name == e.name) }
         save(ctx, rest)
+        setFavorite(ctx, e, false)
         if (rest.none { it.id == e.id } && e.id !in inUse) {
             e.file(ctx).delete()
             pdfFor(ctx, e).delete()
+            textFile(ctx, e.id).delete()
         }
     }
 
@@ -157,11 +198,13 @@ object Library {
         val files = keep.groupBy { it.id }.map { (id, es) -> Triple(id, es.first().size, es.maxOf { it.openedAt }) }
         var total = files.sumOf { it.second }
         val newest = keep.firstOrNull()?.id
+        val favIds = favoriteIds(ctx)
         for ((id, size, _) in files.sortedBy { it.third }) {
             if (total <= MAX_BYTES) break
-            if (id == newest || id in inUse) continue
+            if (id == newest || id in inUse || id in favIds) continue
             File(docsDir(ctx), id).delete()
             File(pdfDir(ctx), id.substringBefore('.') + ".pdf").delete()
+            textFile(ctx, id).delete()
             keep = keep.filter { it.id != id }
             total -= size
         }

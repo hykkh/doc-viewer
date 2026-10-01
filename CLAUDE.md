@@ -3,6 +3,8 @@
 ## 목적
 안드로이드 폰에서 인터넷 없이 HWP·HWPX·DOC·DOCX·XLS·XLSX·PPT·PPTX·PDF(+ODF·RTF·CSV·TXT·그림)를 보는 앱.
 카톡·메일 첨부를 누르면 바로 열리고, 찾기·쪽 이동·원본/PDF 공유·비밀번호 문서를 지원한다.
+0.4.0: 폰에 저장(Download/Hoffice)·인쇄·쪽 그림 공유·읽던 자리·즐겨찾기·종류 거르기·내용으로 찾기·야간 모드·두 번 탭 확대·
+시트 탭·슬라이드쇼·쪽 한눈에 보기·목차·PDF 링크·워드 메모·글자 선택/복사·ZIP 첨부·읽어 주기(TTS).
 
 ## 구조
 | 형식 | 엔진 | 위치 |
@@ -31,13 +33,13 @@ JDK 17, SDK 34, NDK 27.1.12297006, CMake 3.22.1 (`libdvlok.so` 빌드용).
 3. **비밀번호 콜백**: 옛 .doc 은 콜백 url 로 파일 이름만 준다 → 그대로 답하면 SalAbort. 항상 우리가 연 전체 URL 로 답할 것.
    두 번째 요청(=비번 틀림)엔 null(취소)로 답해야 함. 같은 비번을 되풀이하면 수십만 번 묻다 죽는다.
 4. **아주 큰 시트는 SinglePageSheets 금지** (면적 A4 40장 초과 시 일반 쪽 나눔). 한 장짜리 거대 PDF 는 메모리 초과로 죽음.
-5. **rhwp 는 SVG 경로로 그린다** (`renderPageSvg` → blob `<img>`). Canvas 경로는 WMF 차트를 안 그림.
-   페이지 SVG 끼리 id 가 겹치므로 inline 금지.
+5. **rhwp 는 SVG 경로로 그린다** (`renderPageSvg`). Canvas 경로는 WMF 차트를 안 그림.
+   0.4.0 부터 inline SVG(글자 선택·검색 가능 PDF 용) — 쪽끼리 id 가 겹치므로 `prefixIds` 로 쪽마다 접두어 필수.
 6. **rhwp 패치**: `patches/rhwp-wmf-patinvert-mask.patch` (base `patches/rhwp-base-commit.txt`).
    WMF 차트의 XOR 마스크 관용구(PATINVERT → 도형 → PATINVERT)를 도형 채우기로 해석 — 안 하면 꺾은선 차트가 빨간 사각형으로 덮임.
    재빌드: rhwp 체크아웃에 패치 적용 → `cargo build --lib --release --target wasm32-unknown-unknown --locked`
    → `wasm-bindgen 0.2.127 --target web` → `rhwp.js`, `rhwp_bg.wasm` 를 assets 에 복사. (Rust 1.93.1 GNU 툴체인)
-7. HWP → PDF 공유는 WebView 인쇄(`android.print.PdfPrint`)로 만든다. 모양은 같지만 **PDF 안 글자 검색은 안 됨**.
+7. HWP → PDF 공유는 WebView 인쇄(`android.print.PdfPrint`)로 만든다. inline SVG 라 PDF 안 글자도 검색된다.
 8. 디버그 빌드는 16KB 페이지 경고가 뜬다(LibreOffice .so 가 4KB 정렬). 4KB 폰(갤럭시 S24 등)은 정상, 16KB 전용 폰에선 LO 엔진이 안 뜰 수 있음.
 
 9. **pdf.js 6 은 `convertToViewportRectangle` 이 없다** → `convertToViewportPoint` 두 번. (0.1.0 에선 이 때문에 PDF·오피스 찾기가 늘 "없음")
@@ -53,6 +55,12 @@ JDK 17, SDK 34, NDK 27.1.12297006, CMake 3.22.1 (`libdvlok.so` 빌드용).
 16. HWP→PDF 인쇄는 쪽 크기별 named @page(`img.style.page`)로 가로 쪽을 가로 용지에. 인쇄 중 재요청·로딩 전 요청은 막는다.
 17. viewer.js 쪽 슬롯에 gen(세대) — 멀어지거나 회전으로 리셋된 쪽의 늦게 끝난 그리기는 버린다. 찾기에는 searchSeq.
 18. HEIC/HEIF 는 WebView 가 못 읽어 ImageDecoder 로 JPEG 변환 후 표시. UTF-16 텍스트는 BOM 으로 판별.
+19. **HWP SVG 의 그림(`<image>`)이 글자 위를 덮는다** → 길게 눌러도 선택이 안 됨. `.page svg *` 는 pointer-events:none, text/tspan 만 auto.
+20. **안드로이드 ZipFile 은 UTF-8 플래그 무시하고 준 charset 으로 모든 이름을 디코딩**한다. CP949 로 열면 UTF-8 이름 ZIP 이
+    예외(→ 오피스로 잘못 감), UTF-8 로 열면 CP949 이름이 U+FFFD 로 조용히 깨짐. `ZipView.open` = UTF-8 먼저, U+FFFD 있으면 CP949.
+    "MS949" 별칭도 기기마다 다를 수 있어 `korean` 은 후보 목록에서 고른다.
+21. HWP 쪽 글(내용 찾기 색인·읽어 주기)은 `getPageTextLayout` 런을 줄로 묶어 만든다. `getPageText` 는 **표·글상자 글을 뺀다**.
+22. 색인은 `files/text/<id>.txt`, 문서 열 때마다 3초 뒤 백그라운드로 다시 만든다(382쪽 HWPX 약 10초).
 
 ## 시험 장치
 - `OfficeService` 는 `android.permission.DUMP` 보유자(= adb shell)에게만 export. `--ez batch true` 로
@@ -62,4 +70,5 @@ JDK 17, SDK 34, NDK 27.1.12297006, CMake 3.22.1 (`libdvlok.so` 빌드용).
 
 ## 미완 / 다음 할 일
 - 아이폰판(B안: GitHub macOS 빌드 + AltStore 무료 설치) — 형님 결정 대기
-- 암호 걸린 옛 PPT 복호화, PDF 공유본 글자 검색
+- 암호 걸린 옛 PPT 복호화
+- 보류(권하지 않음): PDF 주석·서명, AI 요약, 클라우드 직접 연결

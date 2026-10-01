@@ -60,6 +60,16 @@ class ViewerActivity : AppCompatActivity() {
     // An HWP → PDF print is running; a second one would write the same file.
     private var printing = false
 
+    private var readAloud: ReadAloud? = null
+
+    // Back closes an open contents/thumbnail/slide view before the document.
+    private val overlayBack = object : androidx.activity.OnBackPressedCallback(false) {
+        override fun handleOnBackPressed() {
+            js("window.closeAny && window.closeAny()")
+            isEnabled = false
+        }
+    }
+
     // Decrypted PDF of a password document; deleted when this viewer closes.
     private var lockedPdf: File? = null
 
@@ -69,6 +79,7 @@ class ViewerActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         buildUi()
+        onBackPressedDispatcher.addCallback(this, overlayBack)
 
         val uri = incomingUri(intent)
         val id = intent.getStringExtra(EXTRA_ENTRY_ID)
@@ -182,6 +193,46 @@ class ViewerActivity : AppCompatActivity() {
             DocKind.IMAGE -> showImage(e)
             DocKind.TEXT -> load(e.file(this), "text")
             DocKind.OFFICE -> convertThenLoad(e)
+            DocKind.ZIP -> showZip(e)
+        }
+    }
+
+    /** A ZIP attachment: list what is inside; the chosen file opens in a new viewer. */
+    private fun showZip(e: DocEntry) {
+        lifecycleScope.launch {
+            val items = withContext(Dispatchers.IO) { runCatching { ZipView.list(e.file(this@ViewerActivity)) } }
+            if (!alive()) return@launch
+            val list = items.getOrElse {
+                showError("압축 파일을 읽지 못했습니다")
+                return@launch
+            }
+            if (list.isEmpty()) {
+                showError("압축 파일 안에 파일이 없습니다")
+                return@launch
+            }
+            setStatus("압축 파일 안의 ${list.size}개 파일", spinning = false)
+            val labels = list.map { "${it.name.substringAfterLast('/')}  (${android.text.format.Formatter.formatShortFileSize(this@ViewerActivity, it.size)})" }
+            AlertDialog.Builder(this@ViewerActivity)
+                .setTitle(e.name)
+                .setItems(labels.toTypedArray()) { _, which -> openFromZip(e, list[which].name) }
+                .setNegativeButton("닫기") { _, _ -> finish() }
+                .setOnCancelListener { finish() }
+                .show()
+        }
+    }
+
+    private fun openFromZip(e: DocEntry, entryName: String) {
+        lifecycleScope.launch {
+            val out = withContext(Dispatchers.IO) {
+                runCatching { ZipView.extract(e.file(this@ViewerActivity), entryName, File(cacheDir, "zip/" + UUID.randomUUID())) }
+            }
+            if (!alive()) return@launch
+            out.onSuccess { f ->
+                val uri = FileProvider.getUriForFile(this@ViewerActivity, "$packageName.files", f)
+                startActivity(Intent(this@ViewerActivity, ViewerActivity::class.java).setData(uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+                // Come back to the list when that document is closed.
+                showZip(e)
+            }.onFailure { toast("풀지 못했습니다: ${it.message}") }
         }
     }
 
@@ -217,7 +268,12 @@ class ViewerActivity : AppCompatActivity() {
         loadedKind = kind
         setStatus("여는 중…")
         web.webViewClient = client
-        web.loadUrl("https://$HOST/app/viewer.html?kind=$kind&src=/doc/${Uri.encode(file.name)}")
+        val q = StringBuilder("kind=$kind&src=/doc/${Uri.encode(file.name)}")
+        if (nightMode()) q.append("&night=1")
+        entry?.let { e -> getSharedPreferences(PREFS_POS, MODE_PRIVATE).getString(e.id, null)?.let { q.append("&pos=").append(Uri.encode(it)) } }
+        if (File(file.path + ".json").exists()) q.append("&meta=/doc/meta")
+        web.loadUrl("https://$HOST/app/viewer.html?$q")
+        invalidateOptionsMenu()
     }
 
     private fun convertThenLoad(e: DocEntry, password: String? = null) {
@@ -384,8 +440,10 @@ class ViewerActivity : AppCompatActivity() {
     }.getOrNull()
 
     private fun doc(path: String): WebResourceResponse? {
-        val f = served ?: return null
-        if (Uri.decode(path) != f.name) return null
+        val f0 = served ?: return null
+        // "meta": the sheet list written next to a converted spreadsheet.
+        val f = if (path == "meta") File(f0.path + ".json") else f0
+        if (path != "meta" && Uri.decode(path) != f.name) return null
         return runCatching { WebResourceResponse("application/octet-stream", null, FileInputStream(f)) }.getOrNull()
     }
 
@@ -422,7 +480,41 @@ class ViewerActivity : AppCompatActivity() {
         fun onPrintProgress(done: Int, total: Int) = ui { setStatus("PDF 만드는 중… $done / $total") }
 
         @JavascriptInterface
-        fun onPrintReady(widthPx: Double, heightPx: Double) = ui { writeHwpPdf(widthPx, heightPx) }
+        fun onPrintReady(widthPx: Double, heightPx: Double, mode: String) = ui { writeHwpPdf(widthPx, heightPx, mode) }
+
+        @JavascriptInterface
+        fun savePos(pos: String) {
+            val e = entry ?: return
+            getSharedPreferences(PREFS_POS, MODE_PRIVATE).edit().putString(e.id, pos).apply()
+        }
+
+        @JavascriptInterface
+        fun saveText(text: String) {
+            val e = entry ?: return
+            Library.saveText(this@ViewerActivity, e.id, text)
+        }
+
+        @JavascriptInterface
+        fun savePng(page: Int, base64: String) {
+            val e = entry ?: return
+            lifecycleScope.launch {
+                val f = withContext(Dispatchers.IO) {
+                    runCatching {
+                        File(cacheDir, "page.png").also { it.writeBytes(android.util.Base64.decode(base64, android.util.Base64.DEFAULT)) }
+                    }.getOrNull()
+                }
+                if (f != null && alive()) shareFile(f, "${e.name.substringBeforeLast('.', e.name)} ${page}쪽.png", send = true)
+            }
+        }
+
+        @JavascriptInterface
+        fun doubleTap(x: Float, y: Float) = ui { toggleZoom() }
+
+        @JavascriptInterface
+        fun onPageText(page: Int, text: String) = ui { readAloud?.speak(page, text) }
+
+        @JavascriptInterface
+        fun onOverlay(open: Boolean) = ui { overlayBack.isEnabled = open }
 
         @JavascriptInterface
         fun onPrintFail(message: String) = ui {
@@ -435,6 +527,7 @@ class ViewerActivity : AppCompatActivity() {
         fun onReady(pages: Int) = ui {
             ready = true
             setStatus(null)
+            invalidateOptionsMenu()
         }
 
         @JavascriptInterface
@@ -458,9 +551,27 @@ class ViewerActivity : AppCompatActivity() {
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
         menu.add(0, MENU_FIND, 0, "찾기").setIcon(android.R.drawable.ic_menu_search)
             .setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
-        menu.add(0, MENU_PAGE, 0, "쪽 이동")
+        val paged = loadedKind == "pdf" || loadedKind == "hwp"
+        if (paged) {
+            menu.add(0, MENU_PAGE, 0, "쪽 이동")
+            menu.add(0, MENU_OUTLINE, 0, "목차")
+            menu.add(0, MENU_THUMBS, 0, "쪽 한눈에 보기")
+            menu.add(0, MENU_SLIDES, 0, "슬라이드쇼")
+        }
+        if (loadedKind != "image") {
+            menu.add(0, MENU_READ, 0, if (readAloud?.speaking == true) "읽기 멈춤" else "읽어 주기")
+        }
+        menu.add(0, MENU_NIGHT, 0, "야간 모드").setCheckable(true).setChecked(nightMode())
         menu.add(0, MENU_SHARE, 0, "공유")
-        menu.add(0, MENU_SHARE_PDF, 0, "PDF로 공유")
+        if (paged) {
+            menu.add(0, MENU_SHARE_PDF, 0, "PDF로 공유")
+            menu.add(0, MENU_SHARE_PAGE, 0, "이 쪽을 그림으로 공유")
+        }
+        menu.add(0, MENU_SAVE, 0, "폰에 저장")
+        if (paged) {
+            menu.add(0, MENU_SAVE_PDF, 0, "PDF로 폰에 저장")
+            menu.add(0, MENU_PRINT, 0, "인쇄")
+        }
         menu.add(0, MENU_OPEN_WITH, 0, "다른 앱으로 열기")
         return true
     }
@@ -471,12 +582,87 @@ class ViewerActivity : AppCompatActivity() {
             android.R.id.home -> finish()
             MENU_FIND -> js("window.showSearch && window.showSearch()")
             MENU_PAGE -> js("window.askJump && window.askJump()")
+            MENU_OUTLINE -> js("window.showOutline && window.showOutline()")
+            MENU_THUMBS -> js("window.showThumbs && window.showThumbs()")
+            MENU_SLIDES -> js("window.startSlides && window.startSlides()")
+            MENU_SHARE_PAGE -> js("window.sharePageImage && window.sharePageImage()")
+            MENU_READ -> toggleReadAloud()
+            MENU_NIGHT -> {
+                val on = !nightMode()
+                getSharedPreferences(PREFS_UI, MODE_PRIVATE).edit().putBoolean("night", on).apply()
+                js("window.setNight($on)")
+                invalidateOptionsMenu()
+            }
             MENU_SHARE -> if (e != null) shareFile(e.file(this), e.name, send = true)
             MENU_OPEN_WITH -> if (e != null) shareFile(e.file(this), e.name, send = false)
-            MENU_SHARE_PDF -> if (e != null) sharePdf(e)
+            MENU_SHARE_PDF -> if (e != null) makePdf(e, "pdf")
+            MENU_SAVE_PDF -> if (e != null) makePdf(e, "save")
+            MENU_PRINT -> if (e != null) makePdf(e, "print")
+            MENU_SAVE -> if (e != null) saveCopy(e.file(this), e.name)
             else -> return super.onOptionsItemSelected(item)
         }
         return true
+    }
+
+    private fun nightMode() = getSharedPreferences(PREFS_UI, MODE_PRIVATE).getBoolean("night", false)
+
+    // ---- zoom, read aloud ------------------------------------------------------------
+
+    private var baseScale = 0f
+
+    /** Double tap: zoom in to 2.5x around the page, or back out to fit. */
+    @Suppress("DEPRECATION")
+    private fun toggleZoom() {
+        if (webDead) return
+        val scale = web.scale
+        if (baseScale == 0f) baseScale = scale
+        if (scale > baseScale * 1.3f) web.zoomBy((baseScale / scale).coerceIn(0.02f, 1f)) else web.zoomBy(2.5f)
+    }
+
+    private fun toggleReadAloud() {
+        val r = readAloud
+        if (r != null && r.speaking) {
+            r.stop()
+            toast("읽기를 멈췄습니다")
+            invalidateOptionsMenu()
+            return
+        }
+        val reader = r ?: ReadAloud(this, onNeedPage = { p -> main.post { js("window.speakPage($p)") } }) {
+            main.post { if (alive()) invalidateOptionsMenu() }
+        }.also { readAloud = it }
+        webValue("window.currentPage ? window.currentPage() : 0") { v ->
+            val from = v.toIntOrNull() ?: 0
+            toast("${from + 1}쪽부터 읽습니다")
+            reader.start(from)
+            invalidateOptionsMenu()
+        }
+    }
+
+    private fun webValue(expr: String, then: (String) -> Unit) {
+        if (webDead || !alive()) return
+        web.evaluateJavascript(expr) { then(it?.trim('"') ?: "") }
+    }
+
+    // ---- saving to the phone ---------------------------------------------------------
+
+    private fun saveCopy(file: File, name: String) {
+        if (android.os.Build.VERSION.SDK_INT < 29 &&
+            checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(android.Manifest.permission.WRITE_EXTERNAL_STORAGE), 1)
+            toast("저장 권한을 허용한 뒤 다시 눌러 주세요")
+            return
+        }
+        lifecycleScope.launch {
+            val r = withContext(Dispatchers.IO) {
+                runCatching {
+                    val mime = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(DocKinds.extOf(name)) ?: "application/octet-stream"
+                    saveToDownloads(this@ViewerActivity, file, safeFileName(name), mime)
+                }
+            }
+            if (!alive()) return@launch
+            r.onSuccess { toast("$it 에 저장했습니다") }.onFailure { toast("저장하지 못했습니다: ${it.message}") }
+        }
     }
 
     // ---- sharing -------------------------------------------------------------------
@@ -521,25 +707,34 @@ class ViewerActivity : AppCompatActivity() {
         }
     }
 
-    private fun sharePdf(e: DocEntry) {
+    /**
+     * PDF of the document, then [mode]: "pdf" share it, "save" put it in
+     * Download, "print" send it to the printer. Office documents already are a
+     * PDF; HWP is laid out by the page and printed by the WebView.
+     */
+    private fun makePdf(e: DocEntry, mode: String) {
         val f = served
         when {
-            f != null && loadedKind == "pdf" -> shareFile(f, pdfName(e), send = true)
+            f != null && loadedKind == "pdf" -> when (mode) {
+                "save" -> saveCopy(f, pdfName(e))
+                "print" -> printPdfFile(this, f, e.name)
+                else -> shareFile(f, pdfName(e), send = true)
+            }
             loadedKind == "hwp" -> when {
                 !ready -> toast("문서를 여는 중입니다")
                 printing -> toast("PDF를 만드는 중입니다")
                 else -> {
                     printing = true
-                    setStatus("PDF 만드는 중…")
-                    js("window.preparePrint()")
+                    setStatus(if (mode == "print") "인쇄 준비 중…" else "PDF 만드는 중…")
+                    js("window.preparePrint('$mode')")
                 }
             }
             else -> toast("이 파일은 PDF로 만들 수 없습니다")
         }
     }
 
-    /** Prints the HWP pages the page just laid out into a PDF, then shares it. */
-    private fun writeHwpPdf(widthPx: Double, heightPx: Double) {
+    /** The page has laid out every HWP page for printing; finish the job for [mode]. */
+    private fun writeHwpPdf(widthPx: Double, heightPx: Double, mode: String) {
         val e = entry ?: return
         if (webDead) return
         val mils = { px: Double -> (px / 96.0 * 1000).toInt() }
@@ -548,18 +743,28 @@ class ViewerActivity : AppCompatActivity() {
             .setResolution(android.print.PrintAttributes.Resolution("r", "r", 600, 600))
             .setMinMargins(android.print.PrintAttributes.Margins.NO_MARGINS)
             .build()
-        // One print file, overwritten each time (shareFile copies it out anyway).
+        if (mode == "print") {
+            // The system print dialog drives the WebView adapter itself.
+            printing = false
+            setStatus(null)
+            val pm = getSystemService(PRINT_SERVICE) as android.print.PrintManager
+            pm.print(e.name, web.createPrintDocumentAdapter(e.name), attrs)
+            return
+        }
+        // One print file, overwritten each time (shareFile/saveCopy copy it out).
         val out = File(Library.pdfDir(this), "print.pdf")
         val adapter = web.createPrintDocumentAdapter(e.name)
         android.print.PdfPrint.write(adapter, attrs, out) { err ->
             main.post {
-                // The print-only page images are no longer needed.
                 js("window.cleanupPrint && window.cleanupPrint()")
                 printing = false
                 if (!alive()) return@post
                 setStatus(null)
-                if (err == null && out.length() > 0) shareFile(out, pdfName(e), send = true)
-                else toast("PDF를 만들지 못했습니다: $err")
+                when {
+                    err != null || out.length() == 0L -> toast("PDF를 만들지 못했습니다: $err")
+                    mode == "save" -> saveCopy(out, pdfName(e))
+                    else -> shareFile(out, pdfName(e), send = true)
+                }
             }
         }
     }
@@ -575,6 +780,7 @@ class ViewerActivity : AppCompatActivity() {
         jobId = null
         entry?.let { Library.use(it.id, false) }
         lockedPdf?.delete()
+        readAloud?.shutdown()
         if (!webDead) web.destroy()
         super.onDestroy()
     }
@@ -590,6 +796,17 @@ class ViewerActivity : AppCompatActivity() {
         private const val MENU_FIND = 3
         private const val MENU_PAGE = 4
         private const val MENU_SHARE_PDF = 5
+        private const val MENU_OUTLINE = 6
+        private const val MENU_THUMBS = 7
+        private const val MENU_SLIDES = 8
+        private const val MENU_SHARE_PAGE = 9
+        private const val MENU_READ = 10
+        private const val MENU_NIGHT = 11
+        private const val MENU_SAVE = 12
+        private const val MENU_SAVE_PDF = 13
+        private const val MENU_PRINT = 14
+        private const val PREFS_POS = "positions"
+        private const val PREFS_UI = "ui"
 
         fun officeProcessAlive(ctx: Context): Boolean {
             val am = ctx.getSystemService(ACTIVITY_SERVICE) as ActivityManager

@@ -11,6 +11,7 @@ enum class DocKind {
     OFFICE, // LibreOffice → PDF → pdf.js
     IMAGE,
     TEXT,
+    ZIP,    // a plain archive: list its files and open one
 }
 
 object DocKinds {
@@ -40,7 +41,11 @@ object DocKinds {
             return if (oleIsHwp(file) || ext in hwpExt) DocKind.HWP else DocKind.OFFICE
         }
         if (startsWith("PK")) {
-            return if (zipIsHwpx(file) || ext == "hwpx" || ext == "hwtx") DocKind.HWP else DocKind.OFFICE
+            return when {
+                zipIsHwpx(file) || ext == "hwpx" || ext == "hwtx" -> DocKind.HWP
+                zipIsPlain(file) -> DocKind.ZIP
+                else -> DocKind.OFFICE
+            }
         }
         if (startsWith("<?xml") && ext == "hml") return DocKind.HWP
         // Some PDFs carry junk before the header; readers accept it within the first 1KB.
@@ -89,6 +94,17 @@ object DocKinds {
             return true
         }
         return false
+    }
+
+    /** A ZIP that is not itself an OOXML/ODF/EPUB-like document. */
+    private fun zipIsPlain(file: File): Boolean = try {
+        ZipView.open(file).use { z ->
+            z.getEntry("[Content_Types].xml") == null && z.getEntry("mimetype") == null &&
+                z.getEntry("META-INF/manifest.xml") == null
+        }
+    } catch (e: Exception) {
+        android.util.Log.w("DocKind", "zip check failed", e)
+        false
     }
 
     private fun zipIsHwpx(file: File): Boolean = try {

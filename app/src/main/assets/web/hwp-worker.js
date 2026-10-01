@@ -37,6 +37,67 @@ function search(q) {
   return hits;
 }
 
+// A page's text as drawn, line by line. Unlike getPageText this includes
+// table cells and text boxes, which is where much of a form's text lives.
+function layoutText(p) {
+  const runs = (JSON.parse(doc.getPageTextLayout(p)).runs || []).filter((r) => r.text);
+  const lines = [];
+  for (const r of runs.sort((a, b) => a.y - b.y || a.x - b.x)) {
+    const l = lines.find((o) => Math.abs(o.y - r.y) < Math.max(2, r.h * 0.4));
+    if (l) l.runs.push(r); else lines.push({ y: r.y, runs: [r] });
+  }
+  return lines.sort((a, b) => a.y - b.y).map((l) => {
+    let s = '', end = -Infinity;
+    for (const r of l.runs.sort((a, b) => a.x - b.x)) {
+      if (s && r.x - end > (r.fontSize || 10) * 0.25) s += ' ';
+      s += r.text;
+      end = r.x + r.w;
+    }
+    return s;
+  }).join('\n');
+}
+
+// Many documents have no outline numbering; take lines set clearly larger than
+// the body text as headings instead (larger = higher level).
+function headingsBySize() {
+  const lines = [];
+  const chars = new Map(); // font size → characters set in it
+  for (let p = 0; p < doc.pageCount(); p++) {
+    const layout = JSON.parse(doc.getPageTextLayout(p));
+    const byY = new Map();
+    for (const r of layout.runs || []) {
+      if (!r.text || !r.text.trim()) continue;
+      const k = Math.round(r.y);
+      const o = byY.get(k) || { y: r.y, text: '', size: 0 };
+      o.text += r.text;
+      o.size = Math.max(o.size, r.fontSize);
+      byY.set(k, o);
+    }
+    for (const o of [...byY.values()].sort((a, b) => a.y - b.y)) {
+      lines.push({ ...o, page: p });
+      const s = Math.round(o.size);
+      chars.set(s, (chars.get(s) || 0) + o.text.length);
+    }
+  }
+  let body = 0, most = 0;
+  for (const [s, n] of chars) if (n > most) { most = n; body = s; }
+  const heads = [];
+  for (const l of lines) {
+    const t = l.text.trim();
+    if (l.size < body * 1.35 || t.length > 60 || (t.match(/[가-힣A-Za-z]/g) || []).length < 2) continue;
+    const prev = heads[heads.length - 1];
+    // A title broken over two lines on the same page: join it.
+    if (prev && prev.page === l.page && Math.abs(prev.size - l.size) < 0.5 && l.y - prev.y < l.size * 2.2) {
+      prev.title += ' ' + t;
+      prev.y = l.y;
+      continue;
+    }
+    heads.push({ title: t, page: l.page, size: l.size, y: l.y });
+  }
+  const levels = [...new Set(heads.map((h) => Math.round(h.size)))].sort((a, b) => b - a);
+  return heads.slice(0, 300).map((h) => ({ title: h.title, page: h.page, depth: Math.min(2, levels.indexOf(Math.round(h.size))) }));
+}
+
 self.onmessage = async (ev) => {
   const m = ev.data;
   try {
@@ -61,6 +122,21 @@ self.onmessage = async (ev) => {
       self.postMessage({ type: 'page', id: m.id, svg: doc.renderPageSvg(m.i) });
     } else if (m.type === 'search') {
       self.postMessage({ type: 'found', id: m.id, hits: search(m.q) });
+    } else if (m.type === 'text') {
+      let t = layoutText(m.i);
+      if (!t.trim()) {
+        // getPageText returns a JSON string literal.
+        t = doc.getPageText(m.i);
+        try { t = JSON.parse(t); } catch { /* already plain */ }
+      }
+      self.postMessage({ type: 'text', id: m.id, text: String(t).replace(/\r\n/g, '\n') });
+    } else if (m.type === 'outline') {
+      const nav = JSON.parse(doc.getOutlineNavigation());
+      let items = (nav.outline || [])
+        .filter((o) => o.page > 0 && o.title)
+        .map((o) => ({ title: `${o.number ? o.number + ' ' : ''}${o.title}`, page: o.page - 1, depth: Math.max(0, (o.level || 1) - 1) }));
+      if (!items.length) items = headingsBySize();
+      self.postMessage({ type: 'outline', id: m.id, items });
     }
   } catch (e) {
     const message = (e && e.message) ? e.message : String(e);

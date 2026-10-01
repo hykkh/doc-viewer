@@ -219,11 +219,14 @@ open class OfficeService : Service() {
             // Spreadsheets: one PDF page per sheet holding the whole sheet, so
             // wide tables are not chopped into print-sized strips — unless the
             // sheet is huge, where one giant page exhausts memory.
-            val singlePage = doc.documentType == Document.DOCTYPE_SPREADSHEET && largestSheetArea(doc) < MAX_SINGLE_PAGE_TWIPS2
-            val options = if (singlePage) {
-                """{"SinglePageSheets":{"type":"boolean","value":"true"}}"""
-            } else {
-                ""
+            val type = doc.documentType
+            val singlePage = type == Document.DOCTYPE_SPREADSHEET && largestSheetArea(doc) < MAX_SINGLE_PAGE_TWIPS2
+            sheetNames = if (singlePage) (0 until doc.parts).map { doc.getPartName(it) ?: "시트 ${it + 1}" } else emptyList()
+            val options = when {
+                singlePage -> """{"SinglePageSheets":{"type":"boolean","value":"true"}}"""
+                // Word comments are shown in the page margin (nothing changes without comments).
+                type == Document.DOCTYPE_TEXT -> """{"ExportNotesInMargin":{"type":"boolean","value":"true"}}"""
+                else -> ""
             }
             // Write beside the target and rename when done, so a conversion that
             // is killed or fails never leaves a half-written PDF in the cache.
@@ -239,6 +242,29 @@ open class OfficeService : Service() {
             part.delete()
             throw IllegalStateException("PDF를 저장하지 못했습니다")
         }
+        writeSheetMeta(output)
+    }
+
+    // Sheet names of the spreadsheet being converted one sheet per page.
+    private var sheetNames: List<String> = emptyList()
+
+    /**
+     * Writes "<pdf>.json" with the sheet names, which the viewer shows as tabs.
+     * Hidden sheets are not exported, so the names only line up with the pages
+     * when the counts match; otherwise no tabs rather than wrong ones.
+     */
+    private fun writeSheetMeta(pdf: File) {
+        val meta = File(pdf.path + ".json")
+        meta.delete()
+        if (sheetNames.size < 2 || countPdfPages(pdf) != sheetNames.size) return
+        val arr = org.json.JSONArray()
+        sheetNames.forEachIndexed { i, n -> arr.put(org.json.JSONObject().put("name", n).put("page", i)) }
+        runCatching { meta.writeText(org.json.JSONObject().put("sheets", arr).toString()) }
+    }
+
+    private fun countPdfPages(pdf: File): Int {
+        val text = String(pdf.readBytes(), Charsets.ISO_8859_1)
+        return Regex("""/Type\s*/Page(?![s\w])""").findAll(text).count()
     }
 
     /** Document size in LOK is the active sheet's; the option applies to every sheet, so check them all. */

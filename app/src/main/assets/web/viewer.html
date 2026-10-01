@@ -8,11 +8,15 @@
   html, body { margin: 0; padding: 0; background: #e6e6e6; }
   body { font-family: sans-serif; -webkit-tap-highlight-color: transparent; }
   #pages { padding: 8px 0 40px; }
+  body.has-tabs #pages { padding-bottom: 96px; }
   .page {
     position: relative; margin: 0 auto 10px; background: #fff;
     box-shadow: 0 1px 3px rgba(0,0,0,.25); overflow: hidden;
   }
   .page > canvas, .page > svg, .page > img { display: block; width: 100%; height: 100%; }
+  /* HWP pages: pictures and shapes drawn over text must not swallow the long-press. */
+  .page svg * { pointer-events: none; }
+  .page svg text, .page svg tspan { pointer-events: auto; }
   .page .ph { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #bbb; font-size: 14px; }
   #text { white-space: pre-wrap; word-break: break-all; background: #fff; margin: 8px; padding: 12px; font: 14px/1.6 monospace; }
   #sheet { overflow: auto; margin: 8px; background: #fff; }
@@ -20,14 +24,18 @@
   #sheet table { border-collapse: collapse; font: 14px/1.4 sans-serif; }
   #sheet td, #sheet th { border: 1px solid #ccc; padding: 4px 8px; white-space: nowrap; }
   #sheet th { background: #f1f3f6; color: #777; font-weight: normal; position: sticky; left: 0; }
+  mark { background: rgba(255, 213, 0, .55); color: inherit; }
+  mark.cur { background: rgba(255, 120, 0, .7); outline: 2px solid #ff7800; }
   #img { display: block; max-width: 100%; margin: 8px auto; background: #fff; }
   #pageNum {
     position: fixed; right: 10px; bottom: 12px; background: rgba(0,0,0,.6); color: #fff;
     font-size: 13px; padding: 4px 10px; border-radius: 12px; display: none; z-index: 5;
   }
+  body.has-tabs #pageNum { bottom: 62px; }
   #msg { padding: 40px 20px; text-align: center; color: #555; font-size: 15px; }
-  .hl { position: absolute; background: rgba(255, 213, 0, .38); border-radius: 2px; pointer-events: none; }
+  .hl { position: absolute; background: rgba(255, 213, 0, .38); border-radius: 2px; pointer-events: none; z-index: 2; }
   .hl.cur { background: rgba(255, 120, 0, .5); outline: 2px solid #ff7800; }
+  .lnk { position: absolute; z-index: 3; }
   #search {
     position: fixed; left: 0; right: 0; top: 0; z-index: 10; display: none; gap: 6px; align-items: center;
     background: #fff; padding: 8px; box-shadow: 0 2px 6px rgba(0,0,0,.2);
@@ -35,6 +43,61 @@
   #search input { flex: 1; min-width: 0; font-size: 16px; padding: 8px 10px; border: 1px solid #bbb; border-radius: 8px; }
   #search button { font-size: 16px; min-width: 40px; height: 40px; border: 0; border-radius: 8px; background: #eef2fb; color: #2f6fed; }
   #count { font-size: 13px; color: #555; min-width: 52px; text-align: center; }
+
+  /* Sheet tabs along the bottom */
+  #tabs {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 6; display: none; gap: 6px; overflow-x: auto;
+    padding: 8px; background: #fff; box-shadow: 0 -2px 6px rgba(0,0,0,.15);
+  }
+  #tabs button { flex: none; border: 1px solid #ccd; background: #f6f7fb; border-radius: 16px; padding: 6px 14px; font-size: 14px; color: #333; }
+  #tabs button.on { background: #2f6fed; color: #fff; border-color: #2f6fed; }
+
+  /* Overlays: contents, thumbnails, slideshow */
+  #overlay { position: fixed; inset: 0; z-index: 20; display: none; flex-direction: column; background: #f4f5f7; }
+  body.ov-open { overflow: hidden; }
+  .ov-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.12); font-size: 16px; }
+  .ov-head button { border: 0; background: none; font-size: 20px; color: #555; }
+  .ov-list { overflow-y: auto; flex: 1; }
+  .ov-row { display: flex; width: 100%; justify-content: space-between; gap: 12px; text-align: left; border: 0; border-bottom: 1px solid #e5e7eb; background: #fff; padding: 12px 14px; font-size: 15px; color: #222; }
+  .ov-row em { color: #888; font-style: normal; flex: none; }
+  .ov-grid { overflow-y: auto; flex: 1; display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; padding: 10px; }
+  .tile { border: 2px solid transparent; background: none; padding: 0; }
+  .tile.cur { border-color: #2f6fed; }
+  .tile .tb { background: #fff; min-height: 120px; box-shadow: 0 1px 3px rgba(0,0,0,.2); }
+  .tile .tb canvas { display: block; width: 100%; }
+  .tile span { display: block; font-size: 12px; color: #555; padding: 4px 0; }
+  .slides { position: fixed; inset: 0; background: #000; display: flex; align-items: center; justify-content: center; }
+  .slides canvas { background: #fff; }
+  .slide-n { position: fixed; right: 12px; bottom: 12px; color: #ddd; font-size: 13px; background: rgba(0,0,0,.5); padding: 4px 10px; border-radius: 12px; }
+
+  /* Night mode: invert the page colours (and back for the slideshow black). */
+  body.night { background: #111; }
+  body.night .page, body.night #text, body.night #sheet, body.night #img, body.night .tile .tb { filter: invert(.92) hue-rotate(180deg); }
+
+  /* pdf.js text layer (selectable text over the page picture), from pdf_viewer.css */
+  .textLayer {
+    position: absolute; text-align: initial; inset: 0; overflow: clip; opacity: 1; line-height: 1;
+    -webkit-text-size-adjust: none; text-size-adjust: none; forced-color-adjust: none;
+    transform-origin: 0 0; z-index: 1;
+    --min-font-size: 1;
+    --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+    --min-font-size-inv: calc(1 / var(--min-font-size));
+  }
+  .textLayer :is(span, br) {
+    color: transparent; position: absolute; white-space: pre; cursor: text;
+    transform-origin: 0% 0%; -webkit-user-select: text; user-select: text;
+  }
+  .textLayer > :not(.markedContent), .textLayer .markedContent span:not(.markedContent) {
+    z-index: 1; --font-height: 0;
+    font-size: calc(var(--text-scale-factor) * var(--font-height));
+    --scale-x: 1; --rotate: 0deg;
+    transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+  }
+  .textLayer .markedContent { display: contents; }
+  .textLayer span[role="img"] { user-select: none; cursor: default; }
+  .textLayer ::selection { background: rgba(0, 0, 255, .25); color: transparent; }
+  .textLayer br::selection { background: transparent; }
+  .textLayer .endOfContent { display: block; position: absolute; inset: 100% 0 0; z-index: 0; cursor: default; user-select: none; }
 </style>
 </head>
 <body>
@@ -47,7 +110,9 @@
 </div>
 <div id="msg">여는 중…</div>
 <div id="pages"></div>
+<div id="tabs"></div>
 <div id="pageNum"></div>
+<div id="overlay"></div>
 <script type="module" src="viewer.js"></script>
 </body>
 </html>

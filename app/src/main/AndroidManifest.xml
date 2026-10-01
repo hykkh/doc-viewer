@@ -6,6 +6,10 @@
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="29" />
+    <!-- "폰에 저장" on Android 9 and older (newer ones use MediaStore). -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
 
     <application
         android:allowBackup="false"
@@ -67,6 +71,8 @@
                 <data android:mimeType="application/octet-stream" />
                 <data android:mimeType="application/x-zip-compressed" />
                 <data android:mimeType="application/zip" />
+                <data android:mimeType="image/heic" />
+                <data android:mimeType="image/heif" />
             </intent-filter>
             <!-- "Share to" from any app. -->
             <intent-filter>
