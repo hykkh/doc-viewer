@@ -62,6 +62,14 @@ JDK 17, SDK 34, NDK 27.1.12297006, CMake 3.22.1 (`libdvlok.so` 빌드용).
 21. HWP 쪽 글(내용 찾기 색인·읽어 주기)은 `getPageTextLayout` 런을 줄로 묶어 만든다. `getPageText` 는 **표·글상자 글을 뺀다**.
 22. 색인은 `files/text/<id>.txt`, 문서 열 때마다 3초 뒤 백그라운드로 다시 만든다(382쪽 HWPX 약 10초).
 
+## 사용 승인 (0.5.0~)
+- 처음 한 번 형님 승인 → 이후 오프라인. 서버는 `C:\H-Programs\h-license` (lic.hyt.kr), 자세한 건 그 CLAUDE.md.
+- `License.kt`: 기기 번호 = SHA-256("hoffice:"+ANDROID_ID) 앞 8바이트, 열쇠는 ECDSA P-256 서명을 앱 안 공개키로 확인. 7일마다(인터넷 될 때) 재확인, revoked 면 열쇠 삭제.
+- `ActivationActivity.gate`: Main·Viewer 는 **닫지 않고 아래에 둔 채** 승인 화면을 결과로 띄운다. Viewer 를 먼저 닫으면 카톡 등에서 받은 1회용 파일 읽기 권한이 사라질 수 있다.
+- 승인 화면은 열려 있는 동안 4초마다 상태를 묻는다(거절·중지 상태도 — 형님이 다시 허용하면 저절로 열림).
+- 승인 서버 공개키를 바꾸면 기존 사용자 전원 재승인. 비밀키를 잃지 말 것.
+- 폰 정리 때 `pm clear` 하면 열쇠도 지워진다 → 형님 폰은 관리 페이지에서 다시 허용하거나 재신청.
+
 ## 시험 장치
 - `OfficeService` 는 `android.permission.DUMP` 보유자(= adb shell)에게만 export. `--ez batch true` 로
   `files/batch/order.txt` 목록을 폰 안에서 연속 변환, 결과는 `files/batch/result.tsv`. `OfficeService2/3` 로 3병렬.

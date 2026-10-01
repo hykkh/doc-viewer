@@ -89,6 +89,29 @@ class ViewerActivity : AppCompatActivity() {
             finish()
             return
         }
+        when {
+            License.valid(this) -> openDocument(uri, id)
+            // Recreated (e.g. rotated) while the approval screen is open: its result still comes here.
+            savedInstanceState?.getBoolean("waitingLicense") == true -> waitingLicense = true
+            else -> {
+                waitingLicense = true
+                licenseGate.launch(Intent(this, ActivationActivity::class.java))
+            }
+        }
+    }
+
+    private var waitingLicense = false
+    private val licenseGate = ActivationActivity.gate(this) {
+        waitingLicense = false
+        openDocument(incomingUri(intent), intent.getStringExtra(EXTRA_ENTRY_ID))
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean("waitingLicense", waitingLicense)
+    }
+
+    private fun openDocument(uri: Uri?, id: String?) {
         lifecycleScope.launch {
             try {
                 val e = withContext(Dispatchers.IO) {

@@ -2,6 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!-- "폰의 문서": list documents anywhere on shared storage. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Only for the one-time use approval (lic.hyt.kr); documents never leave the phone. -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
@@ -20,6 +22,9 @@
         android:requestLegacyExternalStorage="true"
         android:theme="@style/AppTheme">
 
+        <activity
+            android:name=".ActivationActivity"
+            android:exported="false" />
         <activity
             android:name=".MainActivity"
             android:exported="true">

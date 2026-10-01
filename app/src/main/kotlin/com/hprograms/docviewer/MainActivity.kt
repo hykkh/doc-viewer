@@ -136,6 +136,17 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
         setContentView(root)
+        waitingLicense = savedInstanceState?.getBoolean("waitingLicense") == true
+        if (!License.valid(this) && !waitingLicense) askLicense()
+    }
+
+    // Unlicensed: the approval screen opens over this one; leaving it unapproved closes the app.
+    private var waitingLicense = false
+    private val licenseGate = ActivationActivity.gate(this) { waitingLicense = false; refresh() }
+
+    private fun askLicense() {
+        waitingLicense = true
+        licenseGate.launch(Intent(this, ActivationActivity::class.java))
     }
 
     override fun onCreateOptionsMenu(menu: android.view.Menu): Boolean {
@@ -148,6 +159,7 @@ class MainActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle("Hoffice ${BuildConfig.VERSION_NAME}")
             .setMessage(
+                (License.holder(this)?.let { "사용자: $it\n\n" } ?: "") +
                 "본 제품은 한글과컴퓨터의 한글 문서 파일(.hwp) 공개 문서를 참고하여 개발하였습니다.\n\n" +
                     "사용한 오픈소스\n" +
                     "• rhwp (MIT) — 한글 문서\n" +
@@ -163,11 +175,16 @@ class MainActivity : AppCompatActivity() {
         super.onSaveInstanceState(outState)
         outState.putString("tab", tab.name)
         outState.putInt("kind", kind)
+        outState.putBoolean("waitingLicense", waitingLicense)
     }
 
     override fun onResume() {
         super.onResume()
         refresh()
+        // Now and then ask whether this phone is still allowed (needs no network to keep working).
+        if (License.valid(this)) lifecycleScope.launch {
+            if (withContext(Dispatchers.IO) { License.recheckIfDue(this@MainActivity) } && !waitingLicense) askLicense()
+        }
     }
 
     private fun chip(label: String, size: Float, onClick: () -> Unit) = TextView(this).apply {
