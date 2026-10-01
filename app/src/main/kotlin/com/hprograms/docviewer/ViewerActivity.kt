@@ -89,6 +89,13 @@ class ViewerActivity : AppCompatActivity() {
             finish()
             return
         }
+        if (Updater.mustUpdate(Updater.known(this))) {
+            // Below the owner's minimum version: the main screen asks for the update.
+            Toast.makeText(this, "업데이트해야 쓸 수 있습니다", Toast.LENGTH_LONG).show()
+            startActivity(Intent(this, MainActivity::class.java))
+            finish()
+            return
+        }
         when {
             License.valid(this) -> openDocument(uri, id)
             // Recreated (e.g. rotated) while the approval screen is open: its result still comes here.

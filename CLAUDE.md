@@ -70,6 +70,14 @@ JDK 17, SDK 34, NDK 27.1.12297006, CMake 3.22.1 (`libdvlok.so` 빌드용).
 - 승인 서버 공개키를 바꾸면 기존 사용자 전원 재승인. 비밀키를 잃지 말 것.
 - 폰 정리 때 `pm clear` 하면 열쇠도 지워진다 → 형님 폰은 관리 페이지에서 다시 허용하거나 재신청.
 
+## 자동 업데이트 (0.5.1~)
+- `Updater.kt`/`UpdateUi.kt`: 켤 때 lic.hyt.kr/api/version 확인(3시간마다) → 새 판이면 와이파이에선 바로 PackageInstaller 로 받아 설치,
+  모바일 데이터면 물어봄. min_code 미만이면 업데이트 전까지 못 씀. 메뉴 "업데이트 확인".
+- Play 프로텍트 [앱 검사]→[설치] 두 번은 사람이 눌러야 한다(새 APK 마다). 처음 한 번 '이 출처의 앱 허용' 필요.
+- `ACCESS_NETWORK_STATE` 없으면 와이파이 판정에서 앱이 죽는다(0.5.1 첫 빌드에서 잡음).
+- 배포: h-programs 릴리스 `hoffice-vX.Y.Z` **`--latest=false`** (와인셀러 사고) → h-license/apps.json → 카탈로그.
+- 시험법: versionCode 를 하나 낮춘 디버그 빌드를 깔면 실제 릴리스로 스스로 업데이트하는 걸 볼 수 있다.
+
 ## 시험 장치
 - `OfficeService` 는 `android.permission.DUMP` 보유자(= adb shell)에게만 export. `--ez batch true` 로
   `files/batch/order.txt` 목록을 폰 안에서 연속 변환, 결과는 `files/batch/result.tsv`. `OfficeService2/3` 로 3병렬.

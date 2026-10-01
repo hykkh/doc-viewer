@@ -150,11 +150,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onCreateOptionsMenu(menu: android.view.Menu): Boolean {
+        menu.add(0, 2, 0, "업데이트 확인")
         menu.add(0, 1, 0, "정보")
         return true
     }
 
     override fun onOptionsItemSelected(item: android.view.MenuItem): Boolean {
+        if (item.itemId == 2) {
+            updates.check(manual = true)
+            return true
+        }
         if (item.itemId != 1) return super.onOptionsItemSelected(item)
         AlertDialog.Builder(this)
             .setTitle("Hoffice ${BuildConfig.VERSION_NAME}")
@@ -182,10 +187,15 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         refresh()
         // Now and then ask whether this phone is still allowed (needs no network to keep working).
-        if (License.valid(this)) lifecycleScope.launch {
-            if (withContext(Dispatchers.IO) { License.recheckIfDue(this@MainActivity) } && !waitingLicense) askLicense()
+        if (License.valid(this)) {
+            lifecycleScope.launch {
+                if (withContext(Dispatchers.IO) { License.recheckIfDue(this@MainActivity) } && !waitingLicense) askLicense()
+            }
+            updates.check()
         }
     }
+
+    private val updates = UpdateUi(this)
 
     private fun chip(label: String, size: Float, onClick: () -> Unit) = TextView(this).apply {
         text = label

@@ -3,6 +3,10 @@
 
     <!-- "폰의 문서": list documents anywhere on shared storage. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Self-update: the app installs its own new version (Updater.kt). -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
     <!-- Only for the one-time use approval (lic.hyt.kr); documents never leave the phone. -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
     <uses-permission
@@ -22,6 +26,9 @@
         android:requestLegacyExternalStorage="true"
         android:theme="@style/AppTheme">
 
+        <receiver
+            android:name=".InstallResultReceiver"
+            android:exported="false" />
         <activity
             android:name=".ActivationActivity"
             android:exported="false" />
