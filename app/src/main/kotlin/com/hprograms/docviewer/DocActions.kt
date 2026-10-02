@@ -2,6 +2,11 @@ package com.hprograms.docviewer
 
 import android.content.ContentValues
 import android.content.Context
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import androidx.lifecycle.lifecycleScope
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.os.CancellationSignal
@@ -194,5 +199,31 @@ class ReadAloud(ctx: Context, private val onNeedPage: (Int) -> Unit, private val
         speaking = false
         tts?.shutdown()
         tts = null
+    }
+}
+
+
+/**
+ * Sends a kept document to another app as the original file under its own name
+ * (KakaoTalk, mail …). The copy goes to cache/share, which FileProvider serves.
+ */
+fun shareOriginal(act: androidx.appcompat.app.AppCompatActivity, file: File, name: String) {
+    act.lifecycleScope.launch {
+        val out = withContext(Dispatchers.IO) {
+            runCatching {
+                val dir = File(act.cacheDir, "share").apply { deleteRecursively(); mkdirs() }
+                var base = name.replace(Regex("[\\/:*?\"<>|\u0000-\u001f]"), "_").trim().ifEmpty { "document" }
+                while (base.toByteArray(Charsets.UTF_8).size > 200) base = base.dropLast(1)
+                File(dir, base).also { file.copyTo(it, overwrite = true) }
+            }.getOrNull()
+        }
+        if (out == null) {
+            android.widget.Toast.makeText(act, "파일을 준비하지 못했습니다", android.widget.Toast.LENGTH_SHORT).show()
+            return@launch
+        }
+        val uri = androidx.core.content.FileProvider.getUriForFile(act, "${act.packageName}.files", out)
+        val mime = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(DocKinds.extOf(out.name)) ?: "application/octet-stream"
+        val i = Intent(Intent.ACTION_SEND).setType(mime).putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        runCatching { act.startActivity(Intent.createChooser(i, "공유")) }
     }
 }

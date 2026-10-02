@@ -264,9 +264,12 @@ class MainActivity : AppCompatActivity() {
                 onLongClick = {
                     AlertDialog.Builder(this)
                         .setTitle(e.name)
-                        .setItems(arrayOf(if (fav) "즐겨찾기 해제" else "즐겨찾기에 추가", "최근 문서에서 지우기")) { _, which ->
-                            if (which == 0) Library.setFavorite(this, e, !fav) else Library.remove(this, e)
-                            refresh()
+                        .setItems(arrayOf("원본 그대로 공유", if (fav) "즐겨찾기 해제" else "즐겨찾기에 추가", "최근 문서에서 지우기")) { _, which ->
+                            when (which) {
+                                0 -> shareOriginal(this, e.file(this), e.name)
+                                1 -> { Library.setFavorite(this, e, !fav); refresh() }
+                                else -> { Library.remove(this, e); refresh() }
+                            }
                         }
                         .show()
                 },
@@ -323,7 +326,9 @@ class MainActivity : AppCompatActivity() {
                 onLongClick = {
                     AlertDialog.Builder(this)
                         .setTitle(f.name)
-                        .setItems(arrayOf("즐겨찾기에 추가")) { _, _ -> addFavorite(f) }
+                        .setItems(arrayOf("원본 그대로 공유", "즐겨찾기에 추가")) { _, which ->
+                            if (which == 0) shareOriginal(this, f, f.name) else addFavorite(f)
+                        }
                         .show()
                 },
             )

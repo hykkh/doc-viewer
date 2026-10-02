@@ -592,7 +592,10 @@ class ViewerActivity : AppCompatActivity() {
             menu.add(0, MENU_READ, 0, if (readAloud?.speaking == true) "읽기 멈춤" else "읽어 주기")
         }
         menu.add(0, MENU_NIGHT, 0, "야간 모드").setCheckable(true).setChecked(nightMode())
-        menu.add(0, MENU_SHARE, 0, "공유")
+        // Top bar icon and a plain menu line do the same: the original file, as it came.
+        menu.add(0, MENU_SHARE_TOP, 0, "원본 공유").setIcon(android.R.drawable.ic_menu_share)
+            .setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+        menu.add(0, MENU_SHARE, 0, "원본 그대로 공유")
         if (paged) {
             menu.add(0, MENU_SHARE_PDF, 0, "PDF로 공유")
             menu.add(0, MENU_SHARE_PAGE, 0, "이 쪽을 그림으로 공유")
@@ -623,7 +626,7 @@ class ViewerActivity : AppCompatActivity() {
                 js("window.setNight($on)")
                 invalidateOptionsMenu()
             }
-            MENU_SHARE -> if (e != null) shareFile(e.file(this), e.name, send = true)
+            MENU_SHARE, MENU_SHARE_TOP -> if (e != null) shareFile(e.file(this), e.name, send = true)
             MENU_OPEN_WITH -> if (e != null) shareFile(e.file(this), e.name, send = false)
             MENU_SHARE_PDF -> if (e != null) makePdf(e, "pdf")
             MENU_SAVE_PDF -> if (e != null) makePdf(e, "save")
@@ -835,6 +838,7 @@ class ViewerActivity : AppCompatActivity() {
         private const val MENU_SAVE = 12
         private const val MENU_SAVE_PDF = 13
         private const val MENU_PRINT = 14
+        private const val MENU_SHARE_TOP = 15
         private const val PREFS_POS = "positions"
         private const val PREFS_UI = "ui"
 
