@@ -88,3 +88,13 @@ JDK 17, SDK 34, NDK 27.1.12297006, CMake 3.22.1 (`libdvlok.so` 빌드용).
 - 아이폰판(B안: GitHub macOS 빌드 + AltStore 무료 설치) — 형님 결정 대기
 - 암호 걸린 옛 PPT 복호화
 - 보류(권하지 않음): PDF 주석·서명, AI 요약, 클라우드 직접 연결
+
+---
+
+## ⏳ 대기 중인 공통 작업 (2026-10-04 인계)
+
+**ActivationActivity (사용 승인) 공통 UI 리디자인** — 4개 앱(doc-viewer, video-downloader, photo-editor, realty-radar) 전부 적용 예정.
+
+→ 상세 인계 문서: **`C:\H-Programs\h-license\ACTIVATION_UI_REDESIGN.md`**
+
+작업 시 그 문서의 §7 적용 순서대로 진행. 이 CLAUDE.md 는 각 앱 로컬 컨텍스트만, 공통 작업 명세/디자인 명세/적용 순서/완료 기준은 전부 저 문서에 있음.
