@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Only the approval screen uses this, so each app keeps its own theme elsewhere.
+         Set it on ActivationActivity in AndroidManifest.xml. -->
+    <style name="Theme.HActivation" parent="Theme.Material3.DayNight.NoActionBar">
+        <!-- System bars blend into the page instead of a coloured band. -->
+        <item name="android:statusBarColor">?android:attr/colorBackground</item>
+        <item name="android:windowLightStatusBar">?attr/isLightTheme</item>
+        <item name="android:navigationBarColor">?android:attr/colorBackground</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="27">?attr/isLightTheme</item>
+    </style>
+</resources>

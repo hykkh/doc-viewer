@@ -31,7 +31,8 @@
             android:exported="false" />
         <activity
             android:name=".ActivationActivity"
-            android:exported="false" />
+            android:exported="false"
+            android:theme="@style/Theme.HActivation" />
         <activity
             android:name=".MainActivity"
             android:exported="true">

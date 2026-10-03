@@ -71,6 +71,7 @@ android {
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
+    implementation(libs.material)   // approval screen (h-license/android-template)
     implementation(libs.androidx.webkit)
     implementation(libs.androidx.recyclerview)
     implementation(libs.kotlinx.coroutines.android)
