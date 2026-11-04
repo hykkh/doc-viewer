@@ -20,7 +20,8 @@
 ## 빌드
 ```bash
 ./scripts/fetch-libreoffice.sh          # 처음 한 번 (엔진 196MB 는 git 에 없음)
-./gradlew assembleRelease               # app/build/outputs/apk/release/app-release.apk (~99MB)
+./gradlew assembleDirectRelease         # APK판(깃허브 배포): app/build/outputs/apk/direct/release/app-direct-release.apk (~99MB)
+./gradlew bundlePlayRelease             # 구글 플레이판: app/build/outputs/bundle/playRelease/app-play-release.aab
 ```
 JDK 17, SDK 34, NDK 27.1.12297006, CMake 3.22.1 (`libdvlok.so` 빌드용).
 
@@ -98,3 +99,12 @@ JDK 17, SDK 34, NDK 27.1.12297006, CMake 3.22.1 (`libdvlok.so` 빌드용).
 → 상세 인계 문서: **`C:\H-Programs\h-license\ACTIVATION_UI_REDESIGN.md`**
 
 작업 시 그 문서의 §7 적용 순서대로 진행. 이 CLAUDE.md 는 각 앱 로컬 컨텍스트만, 공통 작업 명세/디자인 명세/적용 순서/완료 기준은 전부 저 문서에 있음.
+
+## 구글 플레이판 (play 변형, 2026-11-04~)
+- 비공개 테스트로만 배포(형님이 고른 사람만). 직접 배포 APK(direct)는 그대로 유지.
+- play 는 자체 업데이트 없음(스토어가 업데이트), "모든 파일 접근" 없음 → **"폰의 문서" 탭을 숨김**, 파일은 "파일 열기"로.
+- targetSdk 36(구글 기준, 2026-08-31~). 안드로이드 16 은 화면이 상태바 밑까지 그려지는데 AppCompat 상단 바가
+  내용을 안 내려 줘서 `SystemBars.kt` 의 `keepClearOfSystemBars()` 로 직접 맞춤(실폰 확인). direct(target 34)는 영향 없음.
+- 서명: direct = 예전 그대로(debug 키) / play = 업로드 키 `C:\H-Secrets\play\upload.jks`(앱 실제 서명은 구글).
+  서명이 달라서 APK판이 깔린 폰에 스토어판을 깔려면 지우고 깔아야 한다(같은 패키지 이름).
+- 판 번호(versionCode)는 플레이에 올린 것보다 항상 커야 한다. 두 변형이 같은 번호를 쓴다.
