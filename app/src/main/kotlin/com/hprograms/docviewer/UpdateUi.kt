@@ -24,7 +24,7 @@ class UpdateUi(private val act: AppCompatActivity) {
     private var declined = -1 // version code the user put off this session
 
     fun check(manual: Boolean = false) {
-        if (busy) return
+        if (busy || BuildConfig.STORE) return
         if (manual) Updater.forgetCheck(act)
         act.lifecycleScope.launch {
             val r = withContext(Dispatchers.IO) {

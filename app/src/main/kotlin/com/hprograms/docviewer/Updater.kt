@@ -63,6 +63,7 @@ object Updater {
     }
 
     fun known(ctx: Context): Release? {
+        if (BuildConfig.STORE) return null   // Google Play updates the store build.
         val p = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val url = p.getString("url", null) ?: return null
         return Release(p.getString("version", "") ?: "", p.getInt("code", 0), p.getInt("min", 0), url, p.getInt("size", 0))

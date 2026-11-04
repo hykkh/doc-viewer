@@ -46,6 +46,9 @@ class MainActivity : AppCompatActivity() {
 
     private enum class Tab(val label: String) { RECENT("최근 문서"), FAVORITE("즐겨찾기"), PHONE("폰의 문서") }
 
+    // The Play build has no all-files access, so it cannot list the phone's documents; files open through the picker.
+    private val shownTabs = Tab.entries.filter { !(BuildConfig.STORE && it == Tab.PHONE) }
+
     /** Kind filter: label → extensions (empty = all). */
     private val kinds = listOf(
         "전체" to emptySet(),
@@ -105,7 +108,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(query, LinearLayout.LayoutParams(-1, -2).apply { setMargins(pad, 0, pad, dp(8)) })
 
         val tabs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        for (t in Tab.entries) {
+        for (t in shownTabs) {
             val v = chip(t.label, 15f) { tab = t; refresh() }
             tabViews[t] = v
             tabs.addView(v, LinearLayout.LayoutParams(0, dp(42), 1f))
@@ -136,6 +139,7 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
         setContentView(root)
+        keepClearOfSystemBars()
         waitingLicense = savedInstanceState?.getBoolean("waitingLicense") == true
         if (!License.valid(this) && !waitingLicense) askLicense()
     }
@@ -150,7 +154,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onCreateOptionsMenu(menu: android.view.Menu): Boolean {
-        menu.add(0, 2, 0, "업데이트 확인")
+        if (!BuildConfig.STORE) menu.add(0, 2, 0, "업데이트 확인")
         menu.add(0, 1, 0, "정보")
         return true
     }
@@ -213,7 +217,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refresh(debounce: Boolean = false) {
-        Tab.entries.forEach { paint(tabViews.getValue(it), it == tab) }
+        shownTabs.forEach { paint(tabViews.getValue(it), it == tab) }
         kindViews.forEachIndexed { i, v -> paint(v, i == kind) }
         refreshJob?.cancel()
         refreshJob = lifecycleScope.launch {

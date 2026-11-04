@@ -192,6 +192,7 @@ class ViewerActivity : AppCompatActivity() {
         }
         root.addView(status, FrameLayout.LayoutParams(-1, -1))
         setContentView(root)
+        keepClearOfSystemBars()
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
     }
 
