@@ -63,6 +63,14 @@ JDK 17, SDK 34, NDK 27.1.12297006, CMake 3.22.1 (`libdvlok.so` 빌드용).
 21. HWP 쪽 글(내용 찾기 색인·읽어 주기)은 `getPageTextLayout` 런을 줄로 묶어 만든다. `getPageText` 는 **표·글상자 글을 뺀다**.
 22. 색인은 `files/text/<id>.txt`, 문서 열 때마다 3초 뒤 백그라운드로 다시 만든다(382쪽 HWPX 약 10초).
 
+## 스캔 PDF (0.5.5~)
+- **pdf.js 부속 경로는 절대 URL 로** (`viewer.js` openPdf 의 `abs()`). 워커는 상대 경로를 자기 폴더(app/pdfjs/) 기준으로 풀어
+  `./pdfjs/wasm/` 이 pdfjs/pdfjs/wasm/ 이 됐다 → JBIG2 해독기를 못 불러 **스캔 PDF(JBIG2 그림)가 전부 빈 쪽**(2026-11-06 형님 문서).
+- 글자 인식(`Ocr.kt`): 첫 3쪽 글자가 10자 미만이면 viewer.js 가 `Android.ocrStart()` → 폰 안 PdfRenderer(2000px)+ML Kit 한국어
+  모델(번들, 인터넷 불필요) → 줄마다 {t,x,y,w,h}(쪽 비율) → `window.ocrPage(i, lines)` 가 투명 글자 층(.ocrLayer)을 깔아
+  찾기·선택/복사·읽어 주기·내용 색인이 된다. 결과는 `files/ocr/<id>.json` 에 저장(두 번째부터 즉시). 비밀번호 문서는 안 함.
+- 8쪽 스캔 약 7초. APK 가 ML Kit 모델로 약 9MB 늘었다.
+
 ## 사용 승인 (0.5.0~)
 - 처음 한 번 형님 승인 → 이후 오프라인. 서버는 `C:\H-Programs\h-license` (lic.hyt.kr), 자세한 건 그 CLAUDE.md.
 - `License.kt`: 기기 번호 = SHA-256("hoffice:"+ANDROID_ID) 앞 8바이트, 열쇠는 ECDSA P-256 서명을 앱 안 공개키로 확인. 7일마다(인터넷 될 때) 재확인, revoked 면 열쇠 삭제.

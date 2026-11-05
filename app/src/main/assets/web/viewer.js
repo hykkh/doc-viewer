@@ -622,13 +622,17 @@ async function openPdf() {
   const pdfjs = await import('./pdfjs/pdf.min.mjs');
   pdfjs.GlobalWorkerOptions.workerSrc = './pdfjs/pdf.worker.min.mjs';
   const data = await fetchBytes();
+  // Absolute URLs: the worker resolves relative ones against its own folder (app/pdfjs/),
+  // so './pdfjs/wasm/' became pdfjs/pdfjs/wasm/ — the JBIG2 decoder never loaded and
+  // scanned PDFs (JBIG2 images) showed blank pages.
+  const abs = (p) => new URL(p, location.href).href;
   const task = pdfjs.getDocument({
     data,
-    cMapUrl: './pdfjs/cmaps/',
+    cMapUrl: abs('./pdfjs/cmaps/'),
     cMapPacked: true,
-    standardFontDataUrl: './pdfjs/standard_fonts/',
-    wasmUrl: './pdfjs/wasm/',
-    iccUrl: './pdfjs/iccs/',
+    standardFontDataUrl: abs('./pdfjs/standard_fonts/'),
+    wasmUrl: abs('./pdfjs/wasm/'),
+    iccUrl: abs('./pdfjs/iccs/'),
   });
   task.onPassword = async (update, reason) => {
     const pw = await askPassword(reason === 2 ? '비밀번호가 틀렸습니다' : '비밀번호가 걸린 문서입니다');
@@ -652,6 +656,30 @@ async function openPdf() {
   }
 
   const tasks = new Map();
+  // Scanned pages: lines read on the phone (Ocr.kt), { t, x, y, w, h } in page fractions.
+  const ocr = new Map();
+  const ocrMeasure = document.createElement('canvas').getContext('2d');
+  function addOcrLayer(el, i) {
+    const lines = ocr.get(i);
+    el.querySelector('.ocrLayer')?.remove();
+    if (!lines || !lines.length) return;
+    const W = el.clientWidth, H = el.clientHeight;
+    const layer = document.createElement('div');
+    layer.className = 'ocrLayer';
+    for (const l of lines) {
+      const span = document.createElement('span');
+      const fs = Math.max(4, l.h * H * 0.9);
+      span.textContent = l.t;
+      span.style.left = `${l.x * W}px`;
+      span.style.top = `${l.y * H}px`;
+      span.style.fontSize = `${fs}px`;
+      ocrMeasure.font = `${fs}px sans-serif`;
+      const natural = ocrMeasure.measureText(l.t).width || 1;
+      span.style.transform = `scaleX(${(l.w * W) / natural})`;
+      layer.appendChild(span);
+    }
+    el.appendChild(layer);
+  }
   setupPages(sizes, async (i, el) => {
     const page = await pdf.getPage(i + 1);
     const cssW = el.clientWidth;
@@ -709,6 +737,7 @@ async function openPdf() {
         el.appendChild(link);
       }
     } catch { /* no links */ }
+    if (ocr.has(i)) addOcrLayer(el, i);
   }, (i, el) => {
     const t = tasks.get(i);
     if (t) t.cancel();
@@ -781,6 +810,13 @@ async function openPdf() {
       str += it.str;
       if (it.hasEOL) str += '\n';
     }
+    if (!str.trim() && ocr.has(i)) {
+      // A scanned page: the recognised lines, each with its box for find.
+      for (const l of ocr.get(i)) {
+        spans.push({ start: str.length, end: str.length + l.t.length, box: l });
+        str += l.t + '\n';
+      }
+    }
     const v = { raw: str, str: str.toLowerCase(), spans, vp };
     textCache.set(i, v);
     return v;
@@ -798,6 +834,13 @@ async function openPdf() {
         const rects = [];
         for (const s of spans) {
           if (s.end <= at || s.start >= end) continue;
+          if (s.box) {
+            const n = Math.max(1, s.end - s.start);
+            const a2 = (Math.max(at, s.start) - s.start) / n;
+            const b2 = (Math.min(end, s.end) - s.start) / n;
+            rects.push({ x: (s.box.x + s.box.w * a2) * vp.width, y: s.box.y * vp.height, w: s.box.w * (b2 - a2) * vp.width, h: s.box.h * vp.height });
+            continue;
+          }
           const it = s.it;
           const a = Math.max(at, s.start) - s.start;
           const b = Math.min(end, s.end) - s.start;
@@ -819,6 +862,27 @@ async function openPdf() {
   showSheetTabs();
   bridge.onReady(pdf.numPages);
   indexText();
+
+  // A scan (no text on the first pages): have the phone read it, then find / copy /
+  // read-aloud / the content index work on it too.
+  window.ocrBegin = () => notify('스캔 문서입니다. 글자를 읽는 중… (찾기·복사는 잠시 뒤)');
+  window.ocrPage = (i, lines) => {
+    if (!Array.isArray(lines) || i < 0 || i >= pdf.numPages) return;
+    ocr.set(i, lines);
+    textCache.delete(i);
+    const el = document.querySelector(`.page[data-i="${i}"]`) || pagesEl.children[i];
+    if (el && el.querySelector('canvas')) addOcrLayer(el, i);
+  };
+  window.ocrDone = (fromCache) => {
+    if (fromCache === null) { notify('글자를 읽지 못했습니다'); return; }
+    if (!fromCache) notify('글자 읽기 끝 — 찾기·복사·읽어 주기가 됩니다');
+    indexText();
+  };
+  if (bridge.ocrStart) {
+    let chars = 0;
+    for (let i = 0; i < Math.min(3, pdf.numPages); i++) chars += (await pageText(i)).raw.trim().length;
+    if (chars < 10) bridge.ocrStart();
+  }
 }
 
 // ---- HWP / HWPX --------------------------------------------------------------

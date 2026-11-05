@@ -519,6 +519,10 @@ class ViewerActivity : AppCompatActivity() {
             getSharedPreferences(PREFS_POS, MODE_PRIVATE).edit().putString(e.id, pos).apply()
         }
 
+        /** viewer.js found a PDF whose pages are pictures only (a scan): read the text on the phone. */
+        @JavascriptInterface
+        fun ocrStart() = ui { startOcr() }
+
         @JavascriptInterface
         fun saveText(text: String) {
             val e = entry ?: return
@@ -805,6 +809,28 @@ class ViewerActivity : AppCompatActivity() {
 
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
 
+    // Text recognition of a scanned PDF (Ocr.kt). One run per viewer; results are cached per document.
+    private var ocrJob: kotlinx.coroutines.Job? = null
+
+    private fun startOcr() {
+        if (ocrJob?.isActive == true || loadedKind != "pdf") return
+        val e = entry ?: return
+        val f = served ?: return
+        if (lockedPdf != null) return // never keep the text of a password document
+        Ocr.cached(this, e.id)?.let { all ->
+            for (k in all.keys()) js("window.ocrPage && window.ocrPage($k, ${all.getJSONArray(k)})")
+            js("window.ocrDone && window.ocrDone(true)")
+            return
+        }
+        js("window.ocrBegin && window.ocrBegin()")
+        ocrJob = lifecycleScope.launch(Dispatchers.IO) {
+            val ok = runCatching {
+                Ocr.run(this@ViewerActivity, f, e.id) { i, lines -> main.post { js("window.ocrPage && window.ocrPage($i, $lines)") } }
+            }.isSuccess
+            main.post { js("window.ocrDone && window.ocrDone(${if (ok) "false" else "null"})") }
+        }
+    }
+
     override fun onDestroy() {
         // Tell the engine to skip our file if it has not started on it yet.
         jobId?.let {
@@ -815,6 +841,7 @@ class ViewerActivity : AppCompatActivity() {
         entry?.let { Library.use(it.id, false) }
         lockedPdf?.delete()
         readAloud?.shutdown()
+        ocrJob?.cancel()
         if (!webDead) web.destroy()
         super.onDestroy()
     }

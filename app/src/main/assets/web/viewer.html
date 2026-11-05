@@ -74,6 +74,12 @@
   body.night { background: #111; }
   body.night .page, body.night #text, body.night #sheet, body.night #img, body.night .tile .tb { filter: invert(.92) hue-rotate(180deg); }
 
+  /* Text read from a scanned page (Ocr.kt): invisible, but selectable and findable. */
+  .ocrLayer { position: absolute; inset: 0; z-index: 1; line-height: 1; }
+  .ocrLayer span { position: absolute; color: transparent; white-space: pre; transform-origin: 0 0;
+                   font-family: sans-serif; cursor: text; -webkit-user-select: text; user-select: text; }
+  .ocrLayer ::selection { background: rgba(0, 0, 255, .25); color: transparent; }
+
   /* pdf.js text layer (selectable text over the page picture), from pdf_viewer.css */
   .textLayer {
     position: absolute; text-align: initial; inset: 0; overflow: clip; opacity: 1; line-height: 1;

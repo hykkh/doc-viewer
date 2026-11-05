@@ -21,8 +21,8 @@ android {
         applicationId = "com.hprograms.docviewer"
         minSdk = 26
         targetSdk = 34
-        versionCode = 10
-        versionName = "0.5.4"
+        versionCode = 11
+        versionName = "0.5.5"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -109,4 +109,6 @@ dependencies {
     implementation(libs.androidx.webkit)
     implementation(libs.androidx.recyclerview)
     implementation(libs.kotlinx.coroutines.android)
+    // Text recognition of scanned PDFs, on the phone (bundled Korean+Latin model, no network). Ocr.kt
+    implementation("com.google.mlkit:text-recognition-korean:16.0.1")
 }
