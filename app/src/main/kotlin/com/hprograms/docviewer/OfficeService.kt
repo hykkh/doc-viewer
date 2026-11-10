@@ -154,7 +154,7 @@ open class OfficeService : Service() {
             watchdog.postDelayed(kill, timeoutMs)
             val line = try {
                 convert(File(dir, "in/$name"), File(dir, "out$shard.pdf"), password)
-                "OK\t${System.currentTimeMillis() - t0}\t"
+                "OK\t${System.currentTimeMillis() - t0}\t${if (fitSheets) "fit" else ""}"
             } catch (e: Throwable) {
                 "FAIL\t${System.currentTimeMillis() - t0}\t${e.message?.replace('\n', ' ')}"
             }
@@ -215,24 +215,52 @@ open class OfficeService : Service() {
             if (passwordAsks > 0) throw PasswordNeeded(if (password == null) "비밀번호가 걸린 문서입니다" else "비밀번호가 틀렸습니다")
             throw IllegalStateException("문서를 읽지 못했습니다 (${o.error?.takeIf { it.isNotBlank() } ?: "형식 인식 실패"})")
         }
+        // A fit copy left by a conversion that was killed (it may be a decrypted workbook).
+        cacheDir.listFiles { f -> f.name.startsWith("fit-") && System.currentTimeMillis() - f.lastModified() > 5 * 60_000 }
+            ?.forEach { it.delete() }
+        var fitCopy: File? = null
         try {
             // Spreadsheets: one PDF page per sheet holding the whole sheet, so
             // wide tables are not chopped into print-sized strips — unless the
-            // sheet is huge, where one giant page exhausts memory.
+            // sheet is huge, where one giant page exhausts memory: then every
+            // column on one page width, split only downwards (SheetFit).
             val type = doc.documentType
-            val singlePage = type == Document.DOCTYPE_SPREADSHEET && largestSheetArea(doc) < MAX_SINGLE_PAGE_TWIPS2
+            val sheet = type == Document.DOCTYPE_SPREADSHEET
+            val singlePage = sheet && largestSheetArea(doc) < MAX_SINGLE_PAGE_TWIPS2
             sheetNames = if (singlePage) (0 until doc.parts).map { doc.getPartName(it) ?: "시트 ${it + 1}" } else emptyList()
-            val options = when {
-                singlePage -> """{"SinglePageSheets":{"type":"boolean","value":"true"}}"""
-                // Word comments are shown in the page margin (nothing changes without comments).
-                type == Document.DOCTYPE_TEXT -> """{"ExportNotesInMargin":{"type":"boolean","value":"true"}}"""
-                else -> ""
+            fitSheets = sheet && !singlePage
+            if (fitSheets) {
+                fitCopy = File(cacheDir, "fit-${java.util.UUID.randomUUID()}.xlsx")
+                doc.saveAs(fitCopy.toURI().toString(), "xlsx", "")
+            } else {
+                val options = when {
+                    singlePage -> """{"SinglePageSheets":{"type":"boolean","value":"true"}}"""
+                    // Word comments are shown in the page margin (nothing changes without comments).
+                    type == Document.DOCTYPE_TEXT -> """{"ExportNotesInMargin":{"type":"boolean","value":"true"}}"""
+                    else -> ""
+                }
+                // Write beside the target and rename when done, so a conversion that
+                // is killed or fails never leaves a half-written PDF in the cache.
+                doc.saveAs(part.toURI().toString(), "pdf", options)
             }
-            // Write beside the target and rename when done, so a conversion that
-            // is killed or fails never leaves a half-written PDF in the cache.
-            doc.saveAs(part.toURI().toString(), "pdf", options)
         } finally {
             doc.destroy()
+        }
+        fitCopy?.let { copy ->
+            // The copy holds the decrypted workbook for a password file: never keep it.
+            try {
+                if (!copy.exists() || copy.length() == 0L) throw IllegalStateException("시트를 맞추지 못했습니다")
+                SheetFit.fitColumnsToWidth(copy)
+                val d = LokExtra.documentLoadWithOptions(LibreOfficeKit.getLibreOfficeKitHandle(), copy.toURI().toString(), "Batch=true")
+                    ?.let { Document(it) } ?: throw IllegalStateException("시트를 맞추지 못했습니다")
+                try {
+                    d.saveAs(part.toURI().toString(), "pdf", """{"ExportBookmarks":{"type":"boolean","value":"true"}}""")
+                } finally {
+                    d.destroy()
+                }
+            } finally {
+                copy.delete()
+            }
         }
         if (!part.exists() || part.length() == 0L) {
             part.delete()
@@ -247,6 +275,8 @@ open class OfficeService : Service() {
 
     // Sheet names of the spreadsheet being converted one sheet per page.
     private var sheetNames: List<String> = emptyList()
+    // The spreadsheet was printed one page wide (SheetFit): sheets start where the PDF's bookmarks say.
+    private var fitSheets = false
 
     /**
      * Writes "<pdf>.json" with the sheet names, which the viewer shows as tabs.
@@ -256,9 +286,16 @@ open class OfficeService : Service() {
     private fun writeSheetMeta(pdf: File) {
         val meta = File(pdf.path + ".json")
         meta.delete()
-        if (sheetNames.size < 2 || countPdfPages(pdf) != sheetNames.size) return
+        val sheets: List<Pair<String, Int>> = if (fitSheets) {
+            runCatching { SheetFit.bookmarks(pdf) }.getOrDefault(emptyList()).distinctBy { it.second }
+                .also { Log.i(TAG, "sheet bookmarks: $it") }
+        } else {
+            if (countPdfPages(pdf) != sheetNames.size) return
+            sheetNames.mapIndexed { i, n -> n to i }
+        }
+        if (sheets.size < 2) return
         val arr = org.json.JSONArray()
-        sheetNames.forEachIndexed { i, n -> arr.put(org.json.JSONObject().put("name", n).put("page", i)) }
+        sheets.forEach { (n, page) -> arr.put(org.json.JSONObject().put("name", n).put("page", page)) }
         runCatching { meta.writeText(org.json.JSONObject().put("sheets", arr).toString()) }
     }
 

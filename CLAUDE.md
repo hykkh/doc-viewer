@@ -63,6 +63,14 @@ JDK 17, SDK 34, NDK 27.1.12297006, CMake 3.22.1 (`libdvlok.so` 빌드용).
 21. HWP 쪽 글(내용 찾기 색인·읽어 주기)은 `getPageTextLayout` 런을 줄로 묶어 만든다. `getPageText` 는 **표·글상자 글을 뺀다**.
 22. 색인은 `files/text/<id>.txt`, 문서 열 때마다 3초 뒤 백그라운드로 다시 만든다(382쪽 HWPX 약 10초).
 
+## 긴 엑셀 시트 (0.5.7~)
+- SinglePageSheets 를 못 쓰는 큰 시트(면적 A4 40장 초과)는 예전엔 A4 로 잘려 **오른쪽 칸이 딴 쪽으로** 갔고 시트 탭도 없었다(2026-11-10 형님 수선비 xlsx, 67쪽).
+- 지금: LOK 로 xlsx 사본 저장 → `SheetFit.fitColumnsToWidth` 가 시트 XML 에 fitToPage + fitToWidth=1/fitToHeight=0 (+폭 100자 넘으면 가로 용지) → 다시 열어 PDF(ExportBookmarks).
+  시트 시작 쪽은 **PDF 책갈피**(LO 가 시트마다 하나 넣음)에서 읽어 탭을 만든다(`SheetFit.bookmarks`).
+- 폭 300자(가로 A4 두 장) 넘는 시트는 맞추면 점이 되므로 원래 인쇄 설정 그대로(0761.xls 3227자, 0985.xlsx 1881자).
+- 사본은 비번 문서면 복호화본 → finally 삭제 + 5분 넘은 fit-* 정리. 변환 캐시는 `Library.PDF_VERSION` 올리면 업데이트 후 한 번 비워진다.
+- 시험: research/sheet_order.txt(엑셀 769개) 일괄 → 결과 전과 동일(OK 742·FAIL 26·TO 1), 새 경로 30개, 시간 +2~10초.
+
 ## 스캔 PDF (0.5.5~)
 - **pdf.js 부속 경로는 절대 URL 로** (`viewer.js` openPdf 의 `abs()`). 워커는 상대 경로를 자기 폴더(app/pdfjs/) 기준으로 풀어
   `./pdfjs/wasm/` 이 pdfjs/pdfjs/wasm/ 이 됐다 → JBIG2 해독기를 못 불러 **스캔 PDF(JBIG2 그림)가 전부 빈 쪽**(2026-11-06 형님 문서).

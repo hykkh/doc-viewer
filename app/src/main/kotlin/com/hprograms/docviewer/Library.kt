@@ -30,7 +30,21 @@ object Library {
     private val inUse = HashMap<String, Int>()
 
     fun docsDir(ctx: Context) = File(ctx.filesDir, "docs").apply { mkdirs() }
-    fun pdfDir(ctx: Context) = File(ctx.cacheDir, "pdf").apply { mkdirs() }
+    fun pdfDir(ctx: Context): File {
+        val dir = File(ctx.cacheDir, "pdf").apply { mkdirs() }
+        if (!pdfChecked) {
+            pdfChecked = true
+            // Converted copies made by an older conversion are made again (2 = long sheets one page wide).
+            val p = ctx.getSharedPreferences("convert", Context.MODE_PRIVATE)
+            if (p.getInt("version", 1) != PDF_VERSION) {
+                dir.listFiles()?.forEach { if (!it.name.startsWith("locked-") && !it.name.endsWith(".part")) it.delete() }
+                p.edit().putInt("version", PDF_VERSION).apply()
+            }
+        }
+        return dir
+    }
+    private const val PDF_VERSION = 2
+    @Volatile private var pdfChecked = false
 
     fun textDir(ctx: Context) = File(ctx.filesDir, "text").apply { mkdirs() }
     private fun textFile(ctx: Context, id: String) = File(textDir(ctx), id.substringBefore('.') + ".txt")
