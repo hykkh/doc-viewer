@@ -97,7 +97,10 @@ class ViewerActivity : AppCompatActivity() {
             return
         }
         when {
-            License.valid(this) -> openDocument(uri, id)
+            License.valid(this) -> {
+                openDocument(uri, id)
+                updates.check(autoStart = false)
+            }
             // Recreated (e.g. rotated) while the approval screen is open: its result still comes here.
             savedInstanceState?.getBoolean("waitingLicense") == true -> waitingLicense = true
             else -> {
@@ -108,6 +111,7 @@ class ViewerActivity : AppCompatActivity() {
     }
 
     private var waitingLicense = false
+    private val updates = UpdateUi(this)
     private val licenseGate = ActivationActivity.gate(this) {
         waitingLicense = false
         openDocument(incomingUri(intent), intent.getStringExtra(EXTRA_ENTRY_ID))

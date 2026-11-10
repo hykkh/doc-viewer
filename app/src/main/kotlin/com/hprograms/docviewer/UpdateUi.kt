@@ -20,10 +20,13 @@ import kotlinx.coroutines.withContext
  * cannot be used until it is updated.
  */
 class UpdateUi(private val act: AppCompatActivity) {
-    private var busy = false
-    private var declined = -1 // version code the user put off this session
+    companion object {
+        private var busy = false
+        private var declined = -1 // version code the user put off while the app is running
+    }
 
-    fun check(manual: Boolean = false) {
+    /** [autoStart]: on Wi-Fi start downloading without asking (main screen). The viewer asks first. */
+    fun check(manual: Boolean = false, autoStart: Boolean = true) {
         if (busy || BuildConfig.STORE) return
         if (manual) Updater.forgetCheck(act)
         act.lifecycleScope.launch {
@@ -35,7 +38,7 @@ class UpdateUi(private val act: AppCompatActivity) {
             when {
                 r == null || !Updater.isNewer(r) -> if (manual) toast("최신 버전입니다 (${BuildConfig.VERSION_NAME})")
                 Updater.mustUpdate(r) -> offer(r, forced = true)
-                manual || r.code != declined -> if (Updater.onWifi(act) && Updater.canInstall(act)) start(r) else offer(r, forced = false)
+                manual || r.code != declined -> if (autoStart && Updater.onWifi(act) && Updater.canInstall(act)) start(r) else offer(r, forced = false)
             }
         }
     }

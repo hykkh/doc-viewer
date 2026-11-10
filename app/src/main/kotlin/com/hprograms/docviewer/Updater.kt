@@ -28,7 +28,7 @@ import java.net.URL
 object Updater {
     private const val SERVER = "https://lic.hyt.kr"
     private const val PREFS = "update"
-    private const val CHECK_EVERY_MS = 3L * 3600 * 1000
+    private const val CHECK_EVERY_MS = 60L * 1000 // every time the app is opened (not on each screen switch)
 
     data class Release(val version: String, val code: Int, val minCode: Int, val url: String, val sizeMb: Int)
 
