@@ -71,8 +71,9 @@ object SheetFit {
 
     // A4 portrait inside the default margins holds about 100 standard character widths (≈19cm).
     private const val PORTRAIT_CHARS = 100.0
-    // About two landscape pages wide (≈57cm): printed at no less than about half size.
-    private const val MAX_FIT_CHARS = 300.0
+    // About six landscape pages wide: printed at about a sixth of full size, which the
+    // viewer's 10x zoom (redrawn sharp at the zoomed size) still brings to readable print.
+    private const val MAX_FIT_CHARS = 800.0
 
     /** Width of the used columns (the sheet's <dimension>) in character widths, as Excel measures columns. */
     private fun usedWidthChars(s: String): Double {

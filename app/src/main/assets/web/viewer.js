@@ -741,9 +741,62 @@ async function openPdf() {
   }, (i, el) => {
     const t = tasks.get(i);
     if (t) t.cancel();
-    const c = el.querySelector('canvas');
-    if (c) { c.width = 0; c.height = 0; }
+    el.querySelectorAll('canvas').forEach((c) => { c.width = 0; c.height = 0; });
   }, 595); // A4 width in PDF points
+
+  // Pinch-zoom only magnifies the page picture, so small print (a wide sheet fitted
+  // to one page width, a whole sheet on one long page) turns to blur. Once zooming
+  // settles, the part of each page on screen is drawn again at the zoomed size,
+  // over the page picture.
+  let detailGen = 0;
+  const detailTasks = new Set();
+  async function refineDetail() {
+    const gen = ++detailGen;
+    detailTasks.forEach((t) => t.cancel());
+    detailTasks.clear();
+    const vv = window.visualViewport;
+    const zoom = vv ? vv.scale : 1;
+    const old = [...pagesEl.querySelectorAll('canvas.detail')];
+    const drop = () => old.forEach((c) => { c.width = 0; c.height = 0; c.remove(); });
+    if (zoom < 1.3) { drop(); return; }
+    const dpr = window.devicePixelRatio || 1;
+    const view = { x: vv.offsetLeft, y: vv.offsetTop, w: vv.width, h: vv.height };
+    for (const el of pagesEl.querySelectorAll('.page')) {
+      const base = el.querySelector('canvas:not(.detail)');
+      if (!base || !base.width) continue;
+      const r = el.getBoundingClientRect();
+      const x0 = Math.max(r.left, view.x), y0 = Math.max(r.top, view.y);
+      const x1 = Math.min(r.right, view.x + view.w), y1 = Math.min(r.bottom, view.y + view.h);
+      if (x1 <= x0 || y1 <= y0) continue;
+      // Region of the page on screen, in the page's CSS pixels.
+      const rx = x0 - r.left, ry = y0 - r.top, rw = x1 - x0, rh = y1 - y0;
+      const i = Number(el.dataset.i);
+      const page = await pdf.getPage(i + 1);
+      if (gen !== detailGen) return;
+      const k = zoom * dpr; // device pixels per CSS pixel at this zoom
+      const unit = page.getViewport({ scale: 1 });
+      const vp = page.getViewport({ scale: (el.clientWidth / unit.width) * k });
+      const c = document.createElement('canvas');
+      c.className = 'detail';
+      c.width = Math.ceil(rw * k);
+      c.height = Math.ceil(rh * k);
+      if (c.width * c.height > 16e6) continue;
+      Object.assign(c.style, { position: 'absolute', left: `${rx}px`, top: `${ry}px`, width: `${rw}px`, height: `${rh}px` });
+      const t = page.render({ canvasContext: c.getContext('2d'), viewport: vp, transform: [1, 0, 0, 1, -rx * k, -ry * k] });
+      detailTasks.add(t);
+      try { await t.promise; } catch { return; } finally { detailTasks.delete(t); }
+      if (gen !== detailGen || !el.contains(base)) return;
+      base.after(c); // under the text layer, so long-press still selects text
+    }
+    if (gen === detailGen) drop();
+  }
+  let detailTimer = null;
+  const queueDetail = () => { clearTimeout(detailTimer); detailTimer = setTimeout(refineDetail, 250); };
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', queueDetail);
+    window.visualViewport.addEventListener('scroll', queueDetail);
+  }
+  window.addEventListener('scroll', queueDetail, { passive: true });
 
   doc.pageImage = async (i, cssWidth) => {
     const page = await pdf.getPage(i + 1);

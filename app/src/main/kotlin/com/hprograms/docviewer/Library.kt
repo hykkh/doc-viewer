@@ -34,7 +34,7 @@ object Library {
         val dir = File(ctx.cacheDir, "pdf").apply { mkdirs() }
         if (!pdfChecked) {
             pdfChecked = true
-            // Converted copies made by an older conversion are made again (2 = long sheets one page wide).
+            // Converted copies made by an older conversion are made again (2 = long sheets one page wide, 3 = wider sheets too).
             val p = ctx.getSharedPreferences("convert", Context.MODE_PRIVATE)
             if (p.getInt("version", 1) != PDF_VERSION) {
                 dir.listFiles()?.forEach { if (!it.name.startsWith("locked-") && !it.name.endsWith(".part")) it.delete() }
@@ -43,7 +43,7 @@ object Library {
         }
         return dir
     }
-    private const val PDF_VERSION = 2
+    private const val PDF_VERSION = 3
     @Volatile private var pdfChecked = false
 
     fun textDir(ctx: Context) = File(ctx.filesDir, "text").apply { mkdirs() }

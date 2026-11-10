@@ -153,8 +153,16 @@ open class OfficeService : Service() {
             val kill = Runnable { android.os.Process.killProcess(android.os.Process.myPid()) }
             watchdog.postDelayed(kill, timeoutMs)
             val line = try {
-                convert(File(dir, "in/$name"), File(dir, "out$shard.pdf"), password)
-                "OK\t${System.currentTimeMillis() - t0}\t${if (fitSheets) "fit" else ""}"
+                val out = File(dir, "out$shard.pdf")
+                convert(File(dir, "in/$name"), out, password)
+                // files/batch/keep present: keep each PDF (and its tab list) for inspection.
+                val keep = File(dir, "keep")
+                if (keep.isDirectory) {
+                    out.copyTo(File(keep, "$name.pdf"), true)
+                    File(out.path + ".json").takeIf { it.exists() }?.copyTo(File(keep, "$name.json"), true)
+                        ?: File(keep, "$name.json").delete()
+                }
+                "OK\t${System.currentTimeMillis() - t0}\t${if (fitSheets) "fit" else if (scrollReset) "view" else ""}"
             } catch (e: Throwable) {
                 "FAIL\t${System.currentTimeMillis() - t0}\t${e.message?.replace('\n', ' ')}"
             }
@@ -215,10 +223,12 @@ open class OfficeService : Service() {
             if (passwordAsks > 0) throw PasswordNeeded(if (password == null) "비밀번호가 걸린 문서입니다" else "비밀번호가 틀렸습니다")
             throw IllegalStateException("문서를 읽지 못했습니다 (${o.error?.takeIf { it.isNotBlank() } ?: "형식 인식 실패"})")
         }
-        // A fit copy left by a conversion that was killed (it may be a decrypted workbook).
-        cacheDir.listFiles { f -> f.name.startsWith("fit-") && System.currentTimeMillis() - f.lastModified() > 5 * 60_000 }
+        // A copy left by a conversion that was killed (it may be a decrypted workbook).
+        cacheDir.listFiles { f -> (f.name.startsWith("fit-") || f.name.startsWith("view-")) && System.currentTimeMillis() - f.lastModified() > 5 * 60_000 }
             ?.forEach { it.delete() }
-        var fitCopy: File? = null
+        scrollReset = false
+        // Long spreadsheets are exported from a patched copy (see below).
+        var copy: File? = null
         try {
             // Spreadsheets: one PDF page per sheet holding the whole sheet, so
             // wide tables are not chopped into print-sized strips — unless the
@@ -230,15 +240,20 @@ open class OfficeService : Service() {
             sheetNames = if (singlePage) (0 until doc.parts).map { doc.getPartName(it) ?: "시트 ${it + 1}" } else emptyList()
             fitSheets = sheet && !singlePage
             if (fitSheets) {
-                fitCopy = File(cacheDir, "fit-${java.util.UUID.randomUUID()}.xlsx")
-                doc.saveAs(fitCopy.toURI().toString(), "xlsx", "")
+                copy = File(cacheDir, "fit-${java.util.UUID.randomUUID()}.xlsx")
+                doc.saveAs(copy.toURI().toString(), "xlsx", "")
+            } else if (singlePage) {
+                val single = """{"SinglePageSheets":{"type":"boolean","value":"true"}}"""
+                // A workbook saved scrolled down keeps that scroll position, and the
+                // one-page-per-sheet export draws from there: rows above it went missing,
+                // or the whole page was blank. Such a workbook is exported from a copy
+                // (LibreOffice's own format, so nothing else changes) scrolled back to the
+                // top; should that fail, from the workbook as it is.
+                scrollReset = SheetView.scrolled(input) && exportScrolledToTop(doc, part, single)
+                if (!scrollReset) doc.saveAs(part.toURI().toString(), "pdf", single)
             } else {
-                val options = when {
-                    singlePage -> """{"SinglePageSheets":{"type":"boolean","value":"true"}}"""
-                    // Word comments are shown in the page margin (nothing changes without comments).
-                    type == Document.DOCTYPE_TEXT -> """{"ExportNotesInMargin":{"type":"boolean","value":"true"}}"""
-                    else -> ""
-                }
+                // Word comments are shown in the page margin (nothing changes without comments).
+                val options = if (type == Document.DOCTYPE_TEXT) """{"ExportNotesInMargin":{"type":"boolean","value":"true"}}""" else ""
                 // Write beside the target and rename when done, so a conversion that
                 // is killed or fails never leaves a half-written PDF in the cache.
                 doc.saveAs(part.toURI().toString(), "pdf", options)
@@ -246,12 +261,12 @@ open class OfficeService : Service() {
         } finally {
             doc.destroy()
         }
-        fitCopy?.let { copy ->
+        copy?.let { c ->
             // The copy holds the decrypted workbook for a password file: never keep it.
             try {
-                if (!copy.exists() || copy.length() == 0L) throw IllegalStateException("시트를 맞추지 못했습니다")
-                SheetFit.fitColumnsToWidth(copy)
-                val d = LokExtra.documentLoadWithOptions(LibreOfficeKit.getLibreOfficeKitHandle(), copy.toURI().toString(), "Batch=true")
+                if (!c.exists() || c.length() == 0L) throw IllegalStateException("시트를 맞추지 못했습니다")
+                SheetFit.fitColumnsToWidth(c)
+                val d = LokExtra.documentLoadWithOptions(LibreOfficeKit.getLibreOfficeKitHandle(), c.toURI().toString(), "Batch=true")
                     ?.let { Document(it) } ?: throw IllegalStateException("시트를 맞추지 못했습니다")
                 try {
                     d.saveAs(part.toURI().toString(), "pdf", """{"ExportBookmarks":{"type":"boolean","value":"true"}}""")
@@ -259,7 +274,7 @@ open class OfficeService : Service() {
                     d.destroy()
                 }
             } finally {
-                copy.delete()
+                c.delete()
             }
         }
         if (!part.exists() || part.length() == 0L) {
@@ -272,6 +287,34 @@ open class OfficeService : Service() {
         }
         writeSheetMeta(output)
     }
+
+    /** [doc] exported from a copy with every sheet scrolled to the top-left; false if that failed. */
+    private fun exportScrolledToTop(doc: Document, part: File, options: String): Boolean {
+        val c = File(cacheDir, "view-${java.util.UUID.randomUUID()}.ods")
+        // The copy holds the decrypted workbook for a password file: never keep it.
+        try {
+            doc.saveAs(c.toURI().toString(), "ods", "")
+            if (!c.exists() || c.length() == 0L) return false
+            SheetView.scrollToTop(c)
+            val d = LokExtra.documentLoadWithOptions(LibreOfficeKit.getLibreOfficeKitHandle(), c.toURI().toString(), "Batch=true")
+                ?.let { Document(it) } ?: return false
+            try {
+                part.delete()
+                d.saveAs(part.toURI().toString(), "pdf", options)
+            } finally {
+                d.destroy()
+            }
+            return part.exists() && part.length() > 0
+        } catch (e: Exception) {
+            Log.w(TAG, "scroll reset failed", e)
+            return false
+        } finally {
+            c.delete()
+        }
+    }
+
+    // The last spreadsheet was exported from a copy scrolled back to the top (shown in batch results).
+    private var scrollReset = false
 
     // Sheet names of the spreadsheet being converted one sheet per page.
     private var sheetNames: List<String> = emptyList()

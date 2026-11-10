@@ -67,7 +67,15 @@ JDK 17, SDK 34, NDK 27.1.12297006, CMake 3.22.1 (`libdvlok.so` 빌드용).
 - SinglePageSheets 를 못 쓰는 큰 시트(면적 A4 40장 초과)는 예전엔 A4 로 잘려 **오른쪽 칸이 딴 쪽으로** 갔고 시트 탭도 없었다(2026-11-10 형님 수선비 xlsx, 67쪽).
 - 지금: LOK 로 xlsx 사본 저장 → `SheetFit.fitColumnsToWidth` 가 시트 XML 에 fitToPage + fitToWidth=1/fitToHeight=0 (+폭 100자 넘으면 가로 용지) → 다시 열어 PDF(ExportBookmarks).
   시트 시작 쪽은 **PDF 책갈피**(LO 가 시트마다 하나 넣음)에서 읽어 탭을 만든다(`SheetFit.bookmarks`).
-- 폭 300자(가로 A4 두 장) 넘는 시트는 맞추면 점이 되므로 원래 인쇄 설정 그대로(0761.xls 3227자, 0985.xlsx 1881자).
+- 폭 800자(0.5.8~, 전엔 300) 넘는 시트는 맞추면 10배로도 점이므로 원래 인쇄 설정 그대로(0761.xls 3227자, 0985.xlsx 1881자).
+- **확대하면 다시 그린다(0.5.8~)**: 핀치줌은 쪽 그림을 늘리기만 해서 작은 글씨가 흐렸다(쪽 그림은 12M 화소 상한).
+  `viewer.js refineDetail` — 줌이 멈추고 0.25초 뒤 화면에 보이는 부분만 현재 배율로 다시 그려 `canvas.detail` 로 겹친다
+  (pdf.js render 의 transform 으로 잘라 그림). 최대 배율 10배(viewer.html viewport).
+- **스크롤 위치 함정(0.5.8~)**: LO 의 SinglePageSheets 는 시트를 **저장 당시 스크롤 위치부터** 그린다 → 내려 본 채 저장된
+  엑셀은 위쪽 줄·왼쪽 칸이 통째로 빠지거나 빈 쪽(0629.xlsx topLeftCell=A91). xlsx 의 약 9%(형님 Q88 3개 포함).
+  `.uno:GoToStart`(initializeForRendering 해도) 안 먹음. 해결: ods 사본 저장 → `SheetView.scrollToTop` 이 settings.xml 의
+  PositionLeft/Top=0, Right/Bottom=틀고정 위치 → 다시 열어 내보냄. 시트당 +약 1초.
+- 화면 품질 시험: `research/look_check.py` (탭·칸잘림·그린 글자 px·10배 확대 글자·빈쪽). 일괄 시험에 `files/batch/keep/` 폴더가 있으면 PDF 를 남긴다.
 - 사본은 비번 문서면 복호화본 → finally 삭제 + 5분 넘은 fit-* 정리. 변환 캐시는 `Library.PDF_VERSION` 올리면 업데이트 후 한 번 비워진다.
 - 시험: research/sheet_order.txt(엑셀 769개) 일괄 → 결과 전과 동일(OK 742·FAIL 26·TO 1), 새 경로 30개, 시간 +2~10초.
 
