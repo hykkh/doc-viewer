@@ -86,6 +86,7 @@ JDK 17, SDK 34, NDK 27.1.12297006, CMake 3.22.1 (`libdvlok.so` 빌드용).
 - `ACCESS_NETWORK_STATE` 없으면 와이파이 판정에서 앱이 죽는다(0.5.1 첫 빌드에서 잡음).
 - 배포: h-programs 릴리스 `hoffice-vX.Y.Z` **`--latest=false`** (와인셀러 사고) → h-license/apps.json → 카탈로그.
 - 시험법: versionCode 를 하나 낮춘 디버그 빌드를 깔면 실제 릴리스로 스스로 업데이트하는 걸 볼 수 있다.
+- 업데이트 확인(0.5.6~): 앱을 열 때마다(1분 안 재확인은 건너뜀). 첫 화면은 와이파이면 바로 받고, 문서를 바로 연 뷰어는 창으로 묻는다(읽다가 앱이 닫히지 않게). "나중에"는 앱이 꺼질 때까지 유지.
 
 ## 시험 장치
 - `OfficeService` 는 `android.permission.DUMP` 보유자(= adb shell)에게만 export. `--ez batch true` 로
